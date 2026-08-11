@@ -3,15 +3,18 @@
 Layout under ``output_dir``::
 
     outputs/
-      albums.json        # source of truth for album membership
+      albums.json        # source of truth for album membership + nesting
       manifest.json      # processed source images (see manifest.py)
-      unsorted/          # freshly processed images land here
-      album_<slug>/      # one folder per album
-      logs/              # per-run jsonl logs
-      .staging/          # extracted zip uploads / scratch
+      unsorted/          # freshly processed images land here by default
+      album_<slug>/      # one folder per album, flat regardless of nesting
+      logs/              # per-run json logs
+      .staging/          # extracted zip uploads / thumbnails / prepared zips
 
-``albums.json`` is authoritative for membership; every membership change is a
-file move plus a JSON update, performed under a lock and written atomically.
+``albums.json`` is authoritative for both membership and hierarchy. Album
+nesting is recorded as a ``parent`` slug rather than mirrored as nested
+directories: re-parenting an album is then a single atomic JSON update instead
+of a recursive directory move that could be interrupted half-done. Zip exports
+do rebuild the hierarchy, so downloads come out nested.
 """
 
 from __future__ import annotations
@@ -36,7 +39,8 @@ UNSORTED_LABEL = "Unsorted"
 ALBUM_DIR_PREFIX = "album_"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ALBUMS_FILE = "albums.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v1 had no `parent` field; migrated transparently on read
+MAX_DEPTH = 12  # guard against pathological nesting
 
 
 class StorageError(RuntimeError):
@@ -53,6 +57,12 @@ def slugify(name: str) -> str:
         # Names made entirely of non-ASCII characters still need a stable slug.
         slug = "album-" + str(abs(hash(name)) % 10_000_000)
     return slug[:64]
+
+
+def safe_component(name: str) -> str:
+    """Sanitise an album name for use as a single path segment inside a zip."""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", name).strip().strip(".")
+    return cleaned[:80] or "album"
 
 
 def is_image(path: Path) -> bool:
@@ -89,6 +99,7 @@ class Album:
     name: str
     created_at: float
     images: list[str]
+    parent: str | None = None
 
     @property
     def count(self) -> int:
@@ -147,24 +158,131 @@ class AlbumStore:
         except json.JSONDecodeError as exc:
             raise StorageError(f"{self.albums_file} is corrupt: {exc}") from exc
         data.setdefault("albums", {})
+        self._migrate(data)
         return data
+
+    @staticmethod
+    def _migrate(data: dict[str, Any]) -> None:
+        """Bring an older albums.json up to the current schema in memory.
+
+        v1 files have no ``parent`` key; those albums become top level. A parent
+        pointing at a missing album would orphan it, so that is repaired too.
+        """
+        albums = data["albums"]
+        for meta in albums.values():
+            meta.setdefault("parent", None)
+        for slug, meta in albums.items():
+            parent = meta.get("parent")
+            if parent is not None and parent not in albums:
+                log.warning("Album %s referenced missing parent %s; moving to top level",
+                            slug, parent)
+                meta["parent"] = None
+        # A cycle would make the tree walk non-terminating; break any that exist.
+        for slug in albums:
+            seen, cursor = {slug}, albums[slug].get("parent")
+            while cursor is not None:
+                if cursor in seen:
+                    log.warning("Album cycle detected at %s; moving it to top level", slug)
+                    albums[slug]["parent"] = None
+                    break
+                seen.add(cursor)
+                cursor = albums.get(cursor, {}).get("parent")
 
     def _write(self, data: dict[str, Any]) -> None:
         data["version"] = SCHEMA_VERSION
         atomic_write_json(self.albums_file, data)
 
+    @staticmethod
+    def _album_from(slug: str, meta: dict[str, Any]) -> Album:
+        return Album(slug=slug, name=meta.get("name", slug),
+                     created_at=meta.get("created_at", 0.0),
+                     images=list(meta.get("images", [])),
+                     parent=meta.get("parent"))
+
+    # -- hierarchy helpers ------------------------------------------------
+    @staticmethod
+    def _children_of(data: dict[str, Any], parent: str | None) -> list[str]:
+        slugs = [s for s, m in data["albums"].items() if m.get("parent") == parent]
+        slugs.sort(key=lambda s: data["albums"][s].get("name", s).lower())
+        return slugs
+
+    @classmethod
+    def _descendants_of(cls, data: dict[str, Any], slug: str) -> list[str]:
+        found: list[str] = []
+        stack = list(cls._children_of(data, slug))
+        while stack:
+            current = stack.pop(0)
+            found.append(current)
+            stack = list(cls._children_of(data, current)) + stack
+        return found
+
+    @staticmethod
+    def _ancestors_of(data: dict[str, Any], slug: str) -> list[str]:
+        chain: list[str] = []
+        cursor = data["albums"].get(slug, {}).get("parent")
+        while cursor is not None and cursor in data["albums"] and cursor not in chain:
+            chain.append(cursor)
+            cursor = data["albums"][cursor].get("parent")
+        return chain
+
+    @classmethod
+    def _depth_of(cls, data: dict[str, Any], slug: str | None) -> int:
+        if slug is None:
+            return 0
+        return len(cls._ancestors_of(data, slug)) + 1
+
+    @classmethod
+    def _unique_sibling_name(cls, data: dict[str, Any], parent: str | None,
+                             name: str, exclude: str | None = None) -> str:
+        """Return *name*, suffixed if a sibling already uses it.
+
+        Used where a rename is a side effect (promoting children of a deleted
+        album) rather than something the user typed — those paths get an error.
+        """
+        taken = {
+            data["albums"][s].get("name", "").strip().lower()
+            for s in cls._children_of(data, parent) if s != exclude
+        }
+        if name.strip().lower() not in taken:
+            return name
+        for i in range(2, 1000):
+            candidate = f"{name} ({i})"
+            if candidate.strip().lower() not in taken:
+                return candidate
+        raise StorageError(f"could not find a free name near {name!r}")
+
+    def _check_sibling_name(self, data: dict[str, Any], parent: str | None,
+                            name: str, exclude: str | None = None) -> None:
+        for sibling in self._children_of(data, parent):
+            if sibling == exclude:
+                continue
+            if data["albums"][sibling].get("name", "").strip().lower() == name.strip().lower():
+                where = "at the top level" if parent is None else \
+                    f"inside {data['albums'][parent].get('name', parent)!r}"
+                raise StorageError(f"an album named {name!r} already exists {where}")
+
     # -- queries ----------------------------------------------------------
     def list_albums(self) -> list[Album]:
+        """All albums, sorted by name (flat). See :meth:`album_tree` for order."""
         with self._lock:
             data = self._read()
-        albums = [
-            Album(slug=slug, name=meta.get("name", slug),
-                  created_at=meta.get("created_at", 0.0),
-                  images=list(meta.get("images", [])))
-            for slug, meta in data["albums"].items()
-        ]
+        albums = [self._album_from(slug, meta) for slug, meta in data["albums"].items()]
         albums.sort(key=lambda a: a.name.lower())
         return albums
+
+    def album_tree(self) -> list[tuple[Album, int]]:
+        """Albums in depth-first display order, paired with their depth (0 = top)."""
+        with self._lock:
+            data = self._read()
+        ordered: list[tuple[Album, int]] = []
+
+        def walk(parent: str | None, depth: int) -> None:
+            for slug in self._children_of(data, parent):
+                ordered.append((self._album_from(slug, data["albums"][slug]), depth))
+                walk(slug, depth + 1)
+
+        walk(None, 0)
+        return ordered
 
     def get_album(self, slug: str) -> Album:
         with self._lock:
@@ -172,15 +290,44 @@ class AlbumStore:
         meta = data["albums"].get(slug)
         if meta is None:
             raise StorageError(f"no such album: {slug}")
-        return Album(slug=slug, name=meta.get("name", slug),
-                     created_at=meta.get("created_at", 0.0),
-                     images=list(meta.get("images", [])))
+        return self._album_from(slug, meta)
 
-    def find_by_name(self, name: str) -> Album | None:
+    def children(self, slug: str | None) -> list[Album]:
+        with self._lock:
+            data = self._read()
+        return [self._album_from(s, data["albums"][s]) for s in self._children_of(data, slug)]
+
+    def descendants(self, slug: str) -> list[Album]:
+        with self._lock:
+            data = self._read()
+        return [self._album_from(s, data["albums"][s]) for s in self._descendants_of(data, slug)]
+
+    def ancestors(self, slug: str) -> list[Album]:
+        with self._lock:
+            data = self._read()
+        return [self._album_from(s, data["albums"][s]) for s in self._ancestors_of(data, slug)]
+
+    def path_name(self, slug: str, separator: str = " / ") -> str:
+        """Human-readable full path, e.g. ``"Keepers / Portraits"``."""
+        if slug == UNSORTED:
+            return UNSORTED_LABEL
+        with self._lock:
+            data = self._read()
+        if slug not in data["albums"]:
+            return slug
+        parts = [data["albums"][s].get("name", s) for s in
+                 reversed(self._ancestors_of(data, slug))]
+        parts.append(data["albums"][slug].get("name", slug))
+        return separator.join(parts)
+
+    def find_by_name(self, name: str, parent: str | None = None) -> Album | None:
+        """Find an album by name among the children of *parent*."""
         target = name.strip().lower()
-        for album in self.list_albums():
-            if album.name.strip().lower() == target:
-                return album
+        with self._lock:
+            data = self._read()
+        for slug in self._children_of(data, parent):
+            if data["albums"][slug].get("name", "").strip().lower() == target:
+                return self._album_from(slug, data["albums"][slug])
         return None
 
     def list_unsorted(self) -> list[str]:
@@ -191,45 +338,85 @@ class AlbumStore:
         names.sort()
         return names
 
-    def list_images(self, album: str | None) -> list[str]:
-        """Filenames in an album (or unsorted), filtered to files that exist."""
+    def list_images(self, album: str | None,
+                    include_descendants: bool = False) -> list[str]:
+        """Filenames in an album (or unsorted), filtered to files that exist.
+
+        With *include_descendants* the result spans nested albums; because two
+        sub-albums may hold the same filename, use :meth:`list_images_located`
+        when you need to know which album each one came from.
+        """
         if album is None or album == UNSORTED:
             return self.list_unsorted()
-        album_obj = self.get_album(album)
-        directory = self.album_dir(album)
-        return [name for name in album_obj.images if (directory / name).is_file()]
+        if not include_descendants:
+            directory = self.album_dir(album)
+            return [name for name in self.get_album(album).images
+                    if (directory / name).is_file()]
+        return [name for _, name in self.list_images_located(album, include_descendants=True)]
+
+    def list_images_located(self, album: str | None,
+                            include_descendants: bool = False) -> list[tuple[str, str]]:
+        """``(album_slug, filename)`` pairs, optionally spanning sub-albums."""
+        if album is None or album == UNSORTED:
+            return [(UNSORTED, name) for name in self.list_unsorted()]
+        with self._lock:
+            data = self._read()
+            if album not in data["albums"]:
+                raise StorageError(f"no such album: {album}")
+            slugs = [album]
+            if include_descendants:
+                slugs += self._descendants_of(data, album)
+            located: list[tuple[str, str]] = []
+            for slug in slugs:
+                directory = self.album_dir(slug)
+                for name in data["albums"][slug].get("images", []):
+                    if (directory / name).is_file():
+                        located.append((slug, name))
+        return located
+
+    def count_images(self, album: str | None, include_descendants: bool = False) -> int:
+        if album is None or album == UNSORTED:
+            return len(self.list_unsorted())
+        return len(self.list_images_located(album, include_descendants=include_descendants))
 
     def total_counts(self) -> dict[str, int]:
+        """Direct image count per album (plus unsorted), excluding sub-albums."""
         counts = {UNSORTED: len(self.list_unsorted())}
         for album in self.list_albums():
             counts[album.slug] = len(self.list_images(album.slug))
         return counts
 
     # -- mutations --------------------------------------------------------
-    def create_album(self, name: str) -> Album:
+    def create_album(self, name: str, parent: str | None = None) -> Album:
         name = name.strip()
         if not name:
             raise StorageError("album name cannot be empty")
+        if parent == UNSORTED:
+            parent = None  # Unsorted is not a real album, so it can't be a parent
         with self._lock:
             data = self._read()
-            existing = {meta.get("name", "").strip().lower(): slug
-                        for slug, meta in data["albums"].items()}
-            if name.lower() in existing:
-                raise StorageError(f"an album named {name!r} already exists")
+            if parent is not None and parent not in data["albums"]:
+                raise StorageError(f"no such parent album: {parent}")
+            if parent is not None and self._depth_of(data, parent) >= MAX_DEPTH:
+                raise StorageError(f"albums cannot be nested more than {MAX_DEPTH} deep")
+            self._check_sibling_name(data, parent, name)
+
             slug = slugify(name)
             base_slug, i = slug, 1
             while slug in data["albums"]:
                 slug = f"{base_slug}-{i}"
                 i += 1
+            created = time.time()
             data["albums"][slug] = {
                 "name": name,
-                "created_at": time.time(),
+                "created_at": created,
                 "images": [],
+                "parent": parent,
             }
             self.album_dir(slug).mkdir(parents=True, exist_ok=True)
             self._write(data)
-        log.info("Created album %r (slug=%s)", name, slug)
-        return Album(slug=slug, name=name, created_at=time.time(), images=[])
+        log.info("Created album %r (slug=%s, parent=%s)", name, slug, parent)
+        return Album(slug=slug, name=name, created_at=created, images=[], parent=parent)
 
     def rename_album(self, slug: str, new_name: str) -> Album:
         """Rename an album. The slug and directory stay put so links survive."""
@@ -240,42 +427,96 @@ class AlbumStore:
             data = self._read()
             if slug not in data["albums"]:
                 raise StorageError(f"no such album: {slug}")
-            for other, meta in data["albums"].items():
-                if other != slug and meta.get("name", "").strip().lower() == new_name.lower():
-                    raise StorageError(f"an album named {new_name!r} already exists")
+            self._check_sibling_name(data, data["albums"][slug].get("parent"),
+                                     new_name, exclude=slug)
             data["albums"][slug]["name"] = new_name
             self._write(data)
         log.info("Renamed album %s -> %r", slug, new_name)
         return self.get_album(slug)
 
-    def delete_album(self, slug: str, delete_images: bool = False) -> int:
+    def move_album(self, slug: str, new_parent: str | None) -> Album:
+        """Re-parent an album (pass ``None`` to move it to the top level)."""
+        if new_parent == UNSORTED:
+            new_parent = None
+        with self._lock:
+            data = self._read()
+            if slug not in data["albums"]:
+                raise StorageError(f"no such album: {slug}")
+            if new_parent is not None:
+                if new_parent not in data["albums"]:
+                    raise StorageError(f"no such parent album: {new_parent}")
+                if new_parent == slug:
+                    raise StorageError("an album cannot be inside itself")
+                if slug in self._ancestors_of(data, new_parent):
+                    # Allowing this would detach the subtree into a cycle.
+                    raise StorageError(
+                        f"cannot move {data['albums'][slug].get('name', slug)!r} into its "
+                        "own sub-album"
+                    )
+                subtree_depth = 1 + max(
+                    (self._depth_of(data, d) - self._depth_of(data, slug)
+                     for d in self._descendants_of(data, slug)), default=0)
+                if self._depth_of(data, new_parent) + subtree_depth > MAX_DEPTH:
+                    raise StorageError(
+                        f"that move would nest albums more than {MAX_DEPTH} deep")
+            if data["albums"][slug].get("parent") == new_parent:
+                return self._album_from(slug, data["albums"][slug])
+            self._check_sibling_name(data, new_parent,
+                                     data["albums"][slug].get("name", slug), exclude=slug)
+            data["albums"][slug]["parent"] = new_parent
+            self._write(data)
+        log.info("Moved album %s under %s", slug, new_parent or "<top level>")
+        return self.get_album(slug)
+
+    def delete_album(self, slug: str, delete_images: bool = False,
+                     recursive: bool = False) -> dict[str, int]:
         """Delete an album.
 
-        By default the images are moved back to ``unsorted/`` so nothing is lost;
-        pass ``delete_images=True`` to remove the files too. Returns the number
-        of images moved or deleted.
+        Images are moved back to ``unsorted/`` unless *delete_images* is set.
+        Sub-albums are promoted to the deleted album's parent unless *recursive*
+        is set, in which case the whole subtree goes too.
+
+        Returns ``{"images": n, "albums": n}``.
         """
         with self._lock:
             data = self._read()
             if slug not in data["albums"]:
                 raise StorageError(f"no such album: {slug}")
-            directory = self.album_dir(slug)
+            parent = data["albums"][slug].get("parent")
+            children = self._children_of(data, slug)
+
+            if recursive:
+                targets = [slug] + self._descendants_of(data, slug)
+            else:
+                targets = [slug]
+                for child in children:
+                    # Promoting can collide with an existing name at the
+                    # destination; this is a side effect, so resolve it silently.
+                    data["albums"][child]["name"] = self._unique_sibling_name(
+                        data, parent, data["albums"][child].get("name", child),
+                        exclude=child)
+                    data["albums"][child]["parent"] = parent
+
             affected = 0
-            if directory.is_dir():
-                for path in list(directory.iterdir()):
-                    if not path.is_file():
-                        continue
-                    if delete_images:
-                        path.unlink()
-                    else:
-                        shutil.move(str(path), str(unique_path(self.unsorted_dir, path.name)))
-                    affected += 1
-                shutil.rmtree(directory, ignore_errors=True)
-            del data["albums"][slug]
+            for target in targets:
+                directory = self.album_dir(target)
+                if directory.is_dir():
+                    for path in list(directory.iterdir()):
+                        if not path.is_file():
+                            continue
+                        if delete_images:
+                            path.unlink()
+                        else:
+                            shutil.move(str(path),
+                                        str(unique_path(self.unsorted_dir, path.name)))
+                        affected += 1
+                    shutil.rmtree(directory, ignore_errors=True)
+                del data["albums"][target]
             self._write(data)
-        log.info("Deleted album %s (%d images %s)", slug, affected,
-                 "deleted" if delete_images else "moved to unsorted")
-        return affected
+
+        log.info("Deleted %d album(s) rooted at %s (%d images %s)", len(targets), slug,
+                 affected, "deleted" if delete_images else "moved to unsorted")
+        return {"images": affected, "albums": len(targets)}
 
     def assign(self, filenames: Iterable[str], source_album: str | None,
                target_album: str | None) -> list[str]:
@@ -340,6 +581,25 @@ class AlbumStore:
             self._write(data)
         return removed
 
+    def register_image(self, album: str | None, filename: str) -> None:
+        """Record a file already written into an album's directory.
+
+        Used by the batch runner when results are sent straight to an album
+        instead of landing in ``unsorted/``.
+        """
+        key = album or UNSORTED
+        if key == UNSORTED:
+            return  # unsorted is read from disk, so there is nothing to record
+        name = Path(filename).name
+        with self._lock:
+            data = self._read()
+            if key not in data["albums"]:
+                raise StorageError(f"no such album: {key}")
+            images = data["albums"][key]["images"]
+            if name not in images:
+                images.append(name)
+            self._write(data)
+
     def register_output(self, path: Path) -> str:
         """Record a freshly written file in ``unsorted/`` (no JSON entry needed)."""
         if path.parent != self.unsorted_dir:
@@ -375,21 +635,51 @@ class AlbumStore:
             log.info("Sync: +%d -%d entries", len(report["added"]), len(report["removed"]))
         return report
 
-    def zip_album(self, album: str | None, dest_dir: Path | None = None) -> Path:
-        """Zip an album (or unsorted) and return the archive path."""
+    def zip_album(self, album: str | None, dest_dir: Path | None = None,
+                  include_descendants: bool = True) -> Path:
+        """Zip an album (or unsorted) and return the archive path.
+
+        Sub-albums are written as nested folders inside the archive, so the
+        hierarchy survives the download even though it is flat on disk.
+        """
         key = album or UNSORTED
-        name = UNSORTED if key == UNSORTED else slugify(self.get_album(key).name)
-        directory = self.dir_for(album)
-        images = self.list_images(album)
-        if not images:
-            raise StorageError(f"album {name!r} has no images to download")
+        if key == UNSORTED:
+            base_name = UNSORTED
+            entries = [(UNSORTED, name) for name in self.list_unsorted()]
+            prefixes = {UNSORTED: ""}
+        else:
+            with self._lock:
+                data = self._read()
+                if key not in data["albums"]:
+                    raise StorageError(f"no such album: {key}")
+                base_name = slugify(data["albums"][key].get("name", key))
+                # Walk down from the root, building each album's path as we go.
+                prefixes = {key: ""}
+                queue = [key]
+                while queue:
+                    current = queue.pop(0)
+                    if not include_descendants:
+                        break
+                    for child in self._children_of(data, current):
+                        parent_prefix = prefixes[current]
+                        child_name = safe_component(data["albums"][child].get("name", child))
+                        prefixes[child] = (f"{parent_prefix}/{child_name}"
+                                           if parent_prefix else child_name)
+                        queue.append(child)
+            entries = self.list_images_located(key, include_descendants=include_descendants)
+
+        if not entries:
+            raise StorageError(f"album {base_name!r} has no images to download")
+
         dest_dir = dest_dir or (self.staging_dir / "downloads")
         dest_dir.mkdir(parents=True, exist_ok=True)
-        archive = dest_dir / f"{name}_{int(time.time())}.zip"
+        archive = dest_dir / f"{base_name}_{int(time.time())}.zip"
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for filename in images:
-                path = directory / filename
-                if path.is_file():
-                    zf.write(path, arcname=filename)
-        log.info("Wrote %s (%d images)", archive, len(images))
+            for slug, filename in entries:
+                path = self.dir_for(slug) / filename
+                if not path.is_file():
+                    continue
+                prefix = prefixes.get(slug, "")
+                zf.write(path, arcname=f"{prefix}/{filename}" if prefix else filename)
+        log.info("Wrote %s (%d images)", archive, len(entries))
         return archive

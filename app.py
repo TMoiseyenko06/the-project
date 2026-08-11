@@ -37,6 +37,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="run one batch headlessly and exit (no web UI)")
     parser.add_argument("--no-resume", action="store_true",
                         help="with --cli: reprocess images even if already done")
+    parser.add_argument("--album", metavar="NAME",
+                        help="with --cli: file this batch's results into this album "
+                             "(created if needed) instead of unsorted/")
+    parser.add_argument("--album-parent", metavar="NAME",
+                        help="with --cli and --album: nest the album under this one")
     return parser.parse_args(argv)
 
 
@@ -55,16 +60,40 @@ def build_overrides(args: argparse.Namespace) -> dict:
     return overrides
 
 
-def run_cli(config, source: str, prompt: str, resume: bool) -> int:
+def resolve_cli_album(store: AlbumStore, name: str | None,
+                      parent_name: str | None) -> str | None:
+    """Find or create the album named on the command line, returning its slug."""
+    if not name:
+        return None
+    parent_slug = None
+    if parent_name:
+        parent = store.find_by_name(parent_name)
+        if parent is None:
+            parent = store.create_album(parent_name)
+        parent_slug = parent.slug
+    existing = store.find_by_name(name, parent=parent_slug)
+    if existing is not None:
+        return existing.slug
+    return store.create_album(name, parent=parent_slug).slug
+
+
+def run_cli(config, source: str, prompt: str, resume: bool,
+            album: str | None = None, album_parent: str | None = None) -> int:
     """Headless batch run — handy over SSH and for smoke-testing a new model."""
     from imagebatch.batch import BatchError, BatchRunner
     from imagebatch.pipeline import EditPipeline
+    from imagebatch.storage import StorageError
 
     store = AlbumStore(config.output_path)
+    try:
+        target = resolve_cli_album(store, album, album_parent)
+    except StorageError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     runner = BatchRunner(config, store, EditPipeline(config))
     last_line = ""
     try:
-        for progress in runner.run(source, prompt, resume=resume):
+        for progress in runner.run(source, prompt, resume=resume, target_album=target):
             if progress.finished:
                 print("\n" + progress.message)
                 return 1 if progress.failed else 0
@@ -95,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cli:
         source, prompt = args.cli
-        return run_cli(config, source, prompt, resume=not args.no_resume)
+        return run_cli(config, source, prompt, resume=not args.no_resume,
+                       album=args.album, album_parent=args.album_parent)
 
     from imagebatch.ui import launch
 

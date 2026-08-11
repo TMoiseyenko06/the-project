@@ -4,11 +4,14 @@ Run a Hugging Face image-to-image editing model over hundreds of images with a
 single prompt, then browse, review and organise the results into albums — all
 from a web UI you can reach through vast.ai's port mapping.
 
-- **Run** — point at a folder or upload a zip, type one prompt, watch progress.
+- **Run** — point at a folder or upload a zip, type one prompt, pick where the
+  results should land, watch progress.
 - **Gallery** — thumbnail grid, filter by album, multi-select, file into albums.
-- **Albums** — rename, delete, download as zip.
+- **Albums** — nest, rename, move, delete, download as zip.
 
-Resumable, per-image failure isolation, one model load per process.
+Albums can contain albums, batches can file themselves into an album
+automatically, and runs are resumable with per-image failure isolation and one
+model load per process.
 
 ---
 
@@ -36,7 +39,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 Verify the install:
 
 ```bash
-pytest -q          # 140 tests, no GPU required
+pytest -q          # 228 tests, no GPU required
 ```
 
 ## 2. Point it at your model
@@ -129,6 +132,13 @@ startup instead, so the first run isn't slowed by a cold load.
 
 ```bash
 python app.py --cli /workspace/input_images "make it a pencil sketch"
+
+# file the results straight into an album (created if it doesn't exist)
+python app.py --cli /workspace/shoot_a "watercolour" --album "Edited"
+
+# ...nested under another album
+python app.py --cli /workspace/shoot_a "watercolour" \
+    --album "Edited" --album-parent "Shoot A"
 ```
 
 Same resume behaviour and same output layout; prints a summary and exits
@@ -164,30 +174,51 @@ press *Run batch*. You get a live `X / N` count with ETA, and a summary listing
 successes, skips and a table of failures. *Stop* halts after the current image;
 whatever finished is kept and the next run picks up where it left off.
 
+**Send results to** decides where this batch lands. Leave it on *Unsorted* for
+the default behaviour, pick an existing album, or type a name under *…or create
+a new album for this batch* to have one created (optionally nested under
+another) and every image in the run filed into it as it is produced. A typed
+name wins over the dropdown. Nothing is written if the name clashes with an
+existing album — you get an error before any work starts.
+
 ### Gallery tab
-Filter by album (or *Unsorted*). Click images to add them to the selection — the
-right pane shows the clicked image full size, and the *Selection* list lets you
-untick individual files. *Select page* / *Select all* / *Clear* for bulk work.
-Then either move the selection to an existing album, or type a name and
-*Create & move*. Deleting requires ticking the confirmation box.
+Filter by album (or *Unsorted*). Tick **Include sub-albums** to see everything
+nested underneath the selected album; images from sub-albums are captioned
+`Sub-album / filename`. Click images to add them to the selection — the right
+pane shows the clicked image full size, and the *Selection* list lets you untick
+individual files. *Select page* / *Select all* / *Clear* for bulk work.
+
+Then either move the selection to an existing album, or type a name, choose what
+to nest it under, and *Create & move*. A selection spanning several sub-albums
+moves correctly in one go. Deleting requires ticking the confirmation box.
 
 Large batches are paginated (`gallery_page_size`, default 60) and the grid
 renders cached thumbnails, so hundreds of images stay responsive.
 
 ### Albums tab
-Cover thumbnails with image counts, plus rename / delete / download-as-zip for
-the selected album. Deleting an album returns its images to *Unsorted* unless
-you also tick *delete the image files*. *Unsorted* can be downloaded but not
-renamed or deleted.
+Cover thumbnails and an indented **album tree** with per-album counts, shown as
+`direct (+nested)`. An album with no images of its own borrows a thumbnail from
+a sub-album. Per album you can create a child, rename, **move** it under a
+different parent (or back to the top level), download as zip, and delete.
+
+The *Move under* list hides the album itself and its own descendants, so a cycle
+can't be built from the UI; the store rejects one anyway if it's attempted.
+
+Deleting an album:
+- images go back to *Unsorted* unless you tick *delete the image files too*;
+- sub-albums are **promoted** one level up unless you tick *delete its
+  sub-albums too*, which removes the whole subtree.
+
+*Unsorted* can be downloaded but not renamed, moved or deleted.
 
 ## 6. Output layout
 
 ```
 outputs/
-├── albums.json        # source of truth for album membership
+├── albums.json        # source of truth for album membership and nesting
 ├── manifest.json      # processed source images, for resuming
-├── unsorted/          # new results always land here
-├── album_<slug>/      # one folder per album
+├── unsorted/          # where results land unless a batch targets an album
+├── album_<slug>/      # one folder per album — flat, regardless of nesting
 ├── logs/              # run_<timestamp>.json, one per batch
 └── .staging/          # extracted zips, thumbnail cache, prepared downloads
 ```
@@ -196,6 +227,30 @@ Moving an image between albums is a file move plus an `albums.json` update, done
 under a lock and written atomically (temp file + rename), so an interrupted move
 can't corrupt the index. If you rearrange files by hand, they're reconciled into
 `albums.json` at the next startup.
+
+### How nesting is stored
+
+Each album records a `parent` slug in `albums.json`. The directories stay flat:
+`Keepers / Portraits` lives in `outputs/album_portraits/`, not
+`outputs/album_keepers/album_portraits/`. Re-parenting is then a single atomic
+JSON write instead of a recursive directory move that could be interrupted
+half-done, and renaming a parent never touches its children's paths.
+
+The trade-off: **an `rsync` of `outputs/` gives you flat album folders** — the
+hierarchy lives in `albums.json`, not in the directory names. Zip downloads do
+rebuild it, so *Prepare zip* on `Keepers` produces:
+
+```
+img_0.png
+Portraits/img_1.png
+Portraits/Headshots/img_2.png
+```
+
+Untick *Include sub-albums* to zip just the album's own images.
+
+An `albums.json` written before nesting existed loads fine — those albums become
+top level. A hand-edited file with a missing parent or a cycle is repaired on
+read rather than crashing.
 
 Pull results off with the zip button, or directly:
 
@@ -213,8 +268,13 @@ so fixing a corrupt file and re-running just picks it up.
 
 The manifest is flushed as work completes, so a crash or an interrupted run
 loses at most the image in flight. Filing results into albums doesn't break
-resume — moved outputs are tracked to their new location. Deleting an output
-does cause it to be regenerated.
+resume — whether a batch wrote straight into an album or you moved the results
+later, outputs are tracked to their current location. Deleting an output does
+cause it to be regenerated.
+
+Note that the destination album is *not* part of the resume key: re-running the
+same prompt pointed at a different album skips the images rather than producing
+a second copy elsewhere. Uncheck **Resume** if you want a fresh set.
 
 Uncheck **Resume** in the Run tab (or `--no-resume` on the CLI) to force a full
 reprocess.
@@ -272,7 +332,7 @@ imagebatch/
   manifest.py             resume records
   thumbnails.py           cached gallery thumbnails
   ui/                     Gradio layer, one module per tab
-tests/                    140 tests, no GPU needed
+tests/                    228 tests, no GPU needed
 ```
 
 Inference, storage and UI are separate layers: `storage.py` and `batch.py` have

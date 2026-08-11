@@ -410,3 +410,140 @@ def test_auto_batch_survives_corrupt_leading_files(config: Config, tmp_path: Pat
 
     assert final.succeeded == 12
     assert final.failed == 1
+
+
+# -- auto-assign to an album ----------------------------------------------
+def test_results_land_in_target_album(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch Output")
+    runner = build_runner(config, store)
+
+    final = run_to_completion(runner, source_dir, "prompt", target_album=album.slug)
+
+    assert final.succeeded == 4
+    assert store.list_unsorted() == []
+    assert sorted(store.list_images(album.slug)) == [f"img_{i}.png" for i in range(4)]
+    assert "filed into **Batch Output**" in final.message
+
+
+def test_target_album_registered_in_albums_json(config: Config, source_dir: Path) -> None:
+    """Files must be recorded in albums.json, not just written to the folder."""
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch Output")
+    run_to_completion(build_runner(config, store), source_dir, "prompt",
+                      target_album=album.slug)
+
+    reopened = AlbumStore(config.output_path)
+
+    assert len(reopened.get_album(album.slug).images) == 4
+
+
+def test_target_album_works_with_nesting(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    parent = store.create_album("Shoot")
+    child = store.create_album("Edited", parent=parent.slug)
+
+    run_to_completion(build_runner(config, store), source_dir, "prompt",
+                      target_album=child.slug)
+
+    assert len(store.list_images(child.slug)) == 4
+    assert store.list_images(parent.slug) == []
+    assert store.count_images(parent.slug, include_descendants=True) == 4
+
+
+def test_target_album_batched(config: Config, source_dir: Path) -> None:
+    batched = Config(**{**config.__dict__, "batch_size": 4})
+    store = AlbumStore(batched.output_path)
+    album = store.create_album("Batch Output")
+
+    run_to_completion(build_runner(batched, store), source_dir, "prompt",
+                      target_album=album.slug)
+
+    assert len(store.list_images(album.slug)) == 4
+
+
+def test_unknown_target_album_rejected(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    with pytest.raises(BatchError, match="no such album"):
+        list(runner.run(source_dir, "prompt", target_album="ghost"))
+
+    assert store.list_unsorted() == []  # nothing was written
+
+
+def test_unsorted_target_behaves_like_default(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+
+    run_to_completion(build_runner(config, store), source_dir, "prompt",
+                      target_album="unsorted")
+
+    assert len(store.list_unsorted()) == 4
+
+
+def test_resume_works_with_target_album(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch Output")
+    runner = build_runner(config, store)
+    run_to_completion(runner, source_dir, "prompt", target_album=album.slug)
+
+    second = run_to_completion(runner, source_dir, "prompt", target_album=album.slug)
+
+    assert second.skipped == 4
+    assert second.succeeded == 0
+    assert len(store.list_images(album.slug)) == 4  # no duplicates
+
+
+def test_failures_still_isolated_with_target_album(config: Config, source_dir: Path) -> None:
+    (source_dir / "broken.png").write_bytes(b"not an image")
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch Output")
+
+    final = run_to_completion(build_runner(config, store), source_dir, "prompt",
+                              target_album=album.slug)
+
+    assert final.succeeded == 4
+    assert final.failed == 1
+    assert len(store.list_images(album.slug)) == 4
+
+
+def test_run_log_records_target_album(config: Config, source_dir: Path) -> None:
+    import json
+
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch Output")
+    run_to_completion(build_runner(config, store), source_dir, "prompt",
+                      target_album=album.slug)
+
+    log_file = next(iter(store.logs_dir.glob("run_*.json")))
+
+    assert json.loads(log_file.read_text())["target_album"] == album.slug
+
+
+def test_resume_ignores_target_album(config: Config, source_dir: Path) -> None:
+    """Documented behaviour: the destination is not part of the resume key."""
+    store = AlbumStore(config.output_path)
+    first = store.create_album("First")
+    second = store.create_album("Second")
+    runner = build_runner(config, store)
+    run_to_completion(runner, source_dir, "prompt", target_album=first.slug)
+
+    again = run_to_completion(runner, source_dir, "prompt", target_album=second.slug)
+
+    assert again.skipped == 4
+    assert again.succeeded == 0
+    assert len(store.list_images(second.slug)) == 0  # no second copy
+
+
+def test_no_resume_writes_to_the_new_album(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    first = store.create_album("First")
+    second = store.create_album("Second")
+    runner = build_runner(config, store)
+    run_to_completion(runner, source_dir, "prompt", target_album=first.slug)
+
+    again = run_to_completion(runner, source_dir, "prompt", target_album=second.slug,
+                              resume=False)
+
+    assert again.succeeded == 4
+    assert len(store.list_images(second.slug)) == 4

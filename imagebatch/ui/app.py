@@ -28,15 +28,17 @@ def build_ui(config: Config) -> tuple[gr.Blocks, AppContext]:
         gr.Markdown("# Batch Image Editor")
 
         with gr.Tabs():
-            with gr.TabItem("Run"):
-                build_run_tab(ctx)
+            with gr.TabItem("Run") as run_tab_item:
+                run = build_run_tab(ctx)
             with gr.TabItem("Gallery") as gallery_tab_item:
                 gallery = build_gallery_tab(ctx)
             with gr.TabItem("Albums") as albums_tab_item:
                 albums = build_albums_tab(ctx)
 
         # Switching to a tab re-reads from disk, so results from a run that just
-        # finished (or edits made in the other tab) show up without a manual refresh.
+        # finished (or edits made in another tab) show up without a manual refresh.
+        run_tab_item.select(run["refresh"], inputs=run["refresh_inputs"],
+                            outputs=run["refresh_outputs"])
         gallery_tab_item.select(gallery["refresh"], inputs=gallery["inputs"],
                                 outputs=gallery["outputs"])
         albums_tab_item.select(lambda value: albums["render"](value),

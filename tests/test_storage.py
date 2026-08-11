@@ -126,7 +126,7 @@ def test_delete_album_moves_images_to_unsorted(store: AlbumStore) -> None:
 
     affected = store.delete_album(album.slug)
 
-    assert affected == 1
+    assert affected == {"images": 1, "albums": 1}
     assert store.list_unsorted() == ["a.png"]
     assert not store.album_dir(album.slug).exists()
     assert store.list_albums() == []
