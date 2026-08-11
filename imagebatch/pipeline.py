@@ -172,11 +172,7 @@ class EditPipeline:
                 log.warning("from_pretrained rejected optional kwargs (%s); retrying minimally", exc)
                 pipe = pipeline_cls.from_pretrained(cfg.model_id, torch_dtype=self.dtype)
 
-            if cfg.enable_model_cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
-                # Offload manages placement itself; calling .to(device) would undo it.
-                pipe.enable_model_cpu_offload()
-            else:
-                pipe = pipe.to(self.device)
+            self._place_on_device(pipe)
 
             self._apply_loras(pipe)
             self._apply_memory_options(pipe)
@@ -186,6 +182,28 @@ class EditPipeline:
             self.pipe = pipe
             self._inspect_signature()
             log.info("Model ready in %.1fs", time.time() - started)
+
+    def _place_on_device(self, pipe: Any) -> None:
+        """Move the pipeline onto its device, honouring the configured offload mode.
+
+        Both offload modes manage device placement themselves — calling
+        ``.to(device)`` afterward would undo them — so exactly one of these three
+        paths runs, never a mix.
+        """
+        cfg = self.config
+        if cfg.enable_sequential_cpu_offload:
+            if hasattr(pipe, "enable_sequential_cpu_offload"):
+                pipe.enable_sequential_cpu_offload()
+                return
+            log.warning("Pipeline has no enable_sequential_cpu_offload; "
+                       "falling back to a plain .to(device)")
+        elif cfg.enable_model_cpu_offload:
+            if hasattr(pipe, "enable_model_cpu_offload"):
+                pipe.enable_model_cpu_offload()
+                return
+            log.warning("Pipeline has no enable_model_cpu_offload; "
+                       "falling back to a plain .to(device)")
+        pipe.to(self.device)
 
     def _apply_loras(self, pipe: Any) -> None:
         """Load and activate the configured LoRA adapters, if any.
@@ -377,7 +395,12 @@ class EditPipeline:
         cfg = self.config
         if not self.loaded:
             return f"{cfg.model_id} (not loaded)"
-        where = self.device if not cfg.enable_model_cpu_offload else f"{self.device} + cpu offload"
+        if cfg.enable_sequential_cpu_offload:
+            where = f"{self.device} + sequential cpu offload"
+        elif cfg.enable_model_cpu_offload:
+            where = f"{self.device} + cpu offload"
+        else:
+            where = self.device
         suffix = f" · {len(cfg.loras)} LoRA(s)" if cfg.loras else ""
         return f"{cfg.model_id} · {cfg.pipeline_class} · {cfg.dtype} · {where}{suffix}"
 

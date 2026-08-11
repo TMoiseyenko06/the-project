@@ -173,3 +173,21 @@ def test_signature_changes_with_loras() -> None:
 
     assert base.signature() != with_lora.signature()
     assert with_lora.signature() != different_scale.signature()
+
+
+# -- offload config -----------------------------------------------------------
+def test_offload_modes_default_off() -> None:
+    config = Config()
+    assert config.enable_model_cpu_offload is False
+    assert config.enable_sequential_cpu_offload is False
+
+
+def test_offload_modes_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Config(enable_model_cpu_offload=True, enable_sequential_cpu_offload=True)
+
+
+def test_sequential_offload_alone_is_fine() -> None:
+    config = Config(enable_sequential_cpu_offload=True)
+    assert config.enable_sequential_cpu_offload is True
+    assert config.enable_model_cpu_offload is False

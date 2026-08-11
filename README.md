@@ -40,7 +40,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 Verify the install:
 
 ```bash
-pytest -q          # 259 tests, no GPU required
+pytest -q          # 269 tests, no GPU required
 ```
 
 ## 2. Point it at your model
@@ -96,9 +96,29 @@ dtype: bf16                     # bf16 | fp16 | fp32 | auto
 enable_attention_slicing: true  # lower VRAM, slightly slower
 enable_vae_slicing: true
 enable_xformers: true           # needs a matching xformers build
-enable_model_cpu_offload: true  # last resort: fits big models, much slower
 max_side: 1024                  # downscale huge inputs before inference
 ```
+
+If the model still doesn't fit, there are two offload options — try them in this
+order, since the first is cheaper but doesn't always help enough:
+
+```yaml
+enable_model_cpu_offload: true
+```
+Swaps whole pipeline **components** (text encoder / transformer / VAE) between
+GPU and CPU as each takes its turn, so only one is resident at a time. This
+does nothing for a component that's too big on its own — a single 20B-param
+transformer is still one component, and has to be fully resident in VRAM
+during its own turn regardless.
+
+```yaml
+enable_sequential_cpu_offload: true
+```
+Offloads at the **individual layer** level instead, so even one huge component
+only needs one layer's worth of weights on GPU at a time — this is what
+actually helps when the transformer itself doesn't fit. Meaningfully slower
+per image than model-level offload. Mutually exclusive with
+`enable_model_cpu_offload` — the config rejects setting both.
 
 ### LoRA adapters
 
@@ -341,9 +361,11 @@ exists in your installed `diffusers`. Check the model card, and upgrade
 `diffusers` for very new architectures.
 
 **CUDA out of memory** — lower `max_side`, set `batch_size: 1`, enable
-`enable_attention_slicing` / `enable_vae_slicing`, then `enable_model_cpu_offload`
-as a last resort. Single-image OOM is caught, logged and skipped rather than
-killing the run.
+`enable_attention_slicing` / `enable_vae_slicing`, then `enable_model_cpu_offload`,
+and if a single pipeline component (e.g. the transformer in a large model) still
+doesn't fit on its own, `enable_sequential_cpu_offload` as the strongest (and
+slowest) option — see [Fitting the GPU](#fitting-the-gpu). Single-image OOM is
+caught, logged and skipped rather than killing the run.
 
 **`Could not find images on the pipeline output`** — the configured class isn't
 an image-to-image pipeline, or it returned tensors. Try
@@ -372,7 +394,7 @@ imagebatch/
   manifest.py             resume records
   thumbnails.py           cached gallery thumbnails
   ui/                     Gradio layer, one module per tab
-tests/                    259 tests, no GPU needed
+tests/                    269 tests, no GPU needed
 ```
 
 Inference, storage and UI are separate layers: `storage.py` and `batch.py` have

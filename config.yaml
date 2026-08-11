@@ -33,7 +33,14 @@ device: auto             # auto | cuda | cuda:1 | cpu
 enable_attention_slicing: false
 enable_vae_slicing: false
 enable_xformers: false
-enable_model_cpu_offload: false   # much slower, but fits big models on small cards
+enable_model_cpu_offload: false   # swaps whole components (text encoder/transformer/VAE)
+                                   # between GPU and CPU; slower, but a single huge
+                                   # transformer is still one component and stays fully
+                                   # resident during its own turn — doesn't help if THAT
+                                   # is what doesn't fit
+enable_sequential_cpu_offload: false  # offloads layer-by-layer instead; much slower again,
+                                       # but shrinks even one huge component's footprint.
+                                       # Mutually exclusive with enable_model_cpu_offload.
 safety_checker: true              # false disables it on pipelines that have one
 
 # LoRA adapters applied on top of the base model after it loads. Leave empty for

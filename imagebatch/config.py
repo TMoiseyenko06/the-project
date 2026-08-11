@@ -54,7 +54,17 @@ class Config:
     enable_attention_slicing: bool = False
     enable_vae_slicing: bool = False
     enable_xformers: bool = False
+    # Offloads whole pipeline components (text encoder / transformer / VAE)
+    # between GPU and CPU as each takes its turn. A single large transformer is
+    # still one component, so this doesn't shrink its own footprint — it only
+    # avoids the other components also being resident at the same time.
     enable_model_cpu_offload: bool = False
+    # Offloads at the individual-layer level instead, so even one huge
+    # transformer only needs one layer's worth of weights on GPU at a time.
+    # Much slower than enable_model_cpu_offload, but the real fix when a single
+    # component doesn't fit in VRAM on its own. Mutually exclusive with
+    # enable_model_cpu_offload.
+    enable_sequential_cpu_offload: bool = False
     safety_checker: bool = True  # False disables it when the pipeline has one
 
     # --- generation ------------------------------------------------------
@@ -115,6 +125,12 @@ class Config:
                 raise ValueError(
                     f"each entry in `loras` needs a repo_id, got {entry!r}"
                 )
+        if self.enable_model_cpu_offload and self.enable_sequential_cpu_offload:
+            raise ValueError(
+                "enable_model_cpu_offload and enable_sequential_cpu_offload are "
+                "mutually exclusive — sequential offload is the stronger of the "
+                "two, so turn off enable_model_cpu_offload if you want it"
+            )
 
     # -- derived helpers --------------------------------------------------
     @property

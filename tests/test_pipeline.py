@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from PIL import Image
 
@@ -273,3 +275,92 @@ def test_describe_omits_lora_when_unconfigured() -> None:
     pipeline.load()
 
     assert "LoRA" not in pipeline.describe()
+
+
+# -- device placement / offload modes ---------------------------------------
+class PlaceablePipe:
+    """Stands in for a diffusers pipeline that supports both offload modes."""
+
+    def __init__(self, supports_model_offload=True, supports_sequential_offload=True):
+        self.calls: list[str] = []
+        self.device: Any = None
+        if supports_model_offload:
+            self.enable_model_cpu_offload = lambda: self.calls.append("model_offload")
+        if supports_sequential_offload:
+            self.enable_sequential_cpu_offload = lambda: self.calls.append("sequential_offload")
+
+    def to(self, device):
+        self.calls.append(f"to:{device}")
+        self.device = device
+        return self
+
+
+def test_place_on_device_plain_to_by_default() -> None:
+    pipeline = EditPipeline(Config(model_id="mock", device="cpu"))
+    pipeline.device = "cpu"
+    pipe = PlaceablePipe()
+
+    pipeline._place_on_device(pipe)
+
+    assert pipe.calls == ["to:cpu"]
+
+
+def test_place_on_device_uses_model_offload() -> None:
+    config = Config(model_id="mock", enable_model_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.device = "cuda"
+    pipe = PlaceablePipe()
+
+    pipeline._place_on_device(pipe)
+
+    assert pipe.calls == ["model_offload"]  # not also .to()
+
+
+def test_place_on_device_uses_sequential_offload() -> None:
+    config = Config(model_id="mock", enable_sequential_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.device = "cuda"
+    pipe = PlaceablePipe()
+
+    pipeline._place_on_device(pipe)
+
+    assert pipe.calls == ["sequential_offload"]
+
+
+def test_place_on_device_falls_back_when_model_offload_unsupported() -> None:
+    config = Config(model_id="mock", enable_model_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.device = "cuda"
+    pipe = PlaceablePipe(supports_model_offload=False)
+
+    pipeline._place_on_device(pipe)
+
+    assert pipe.calls == ["to:cuda"]
+
+
+def test_place_on_device_falls_back_when_sequential_offload_unsupported() -> None:
+    config = Config(model_id="mock", enable_sequential_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.device = "cuda"
+    pipe = PlaceablePipe(supports_sequential_offload=False)
+
+    pipeline._place_on_device(pipe)
+
+    assert pipe.calls == ["to:cuda"]
+
+
+def test_describe_reports_sequential_offload() -> None:
+    config = Config(model_id="mock", enable_sequential_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.load()
+
+    assert "sequential cpu offload" in pipeline.describe()
+
+
+def test_describe_reports_model_offload() -> None:
+    config = Config(model_id="mock", enable_model_cpu_offload=True)
+    pipeline = EditPipeline(config)
+    pipeline.load()
+
+    assert "+ cpu offload" in pipeline.describe()
+    assert "sequential" not in pipeline.describe()
