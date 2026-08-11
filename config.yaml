@@ -1,0 +1,72 @@
+# Batch Image Editor configuration.
+#
+# Every key below can also be set with an IMGBATCH_-prefixed environment
+# variable (IMGBATCH_MODEL_ID, IMGBATCH_PORT, ...). Env vars win over this file.
+
+# ---------------------------------------------------------------- model ----
+# The only two lines you normally need to touch when swapping models.
+# `model_id` is any Hugging Face repo id or local path.
+# `pipeline_class` is resolved from the `diffusers` package by name — use the
+# class named on the model card.
+#
+# Examples:
+#   model_id: timbrooks/instruct-pix2pix
+#   pipeline_class: StableDiffusionInstructPix2PixPipeline
+#
+#   model_id: stabilityai/stable-diffusion-xl-refiner-1.0
+#   pipeline_class: AutoPipelineForImage2Image
+#
+#   model_id: black-forest-labs/FLUX.1-Kontext-dev
+#   pipeline_class: FluxKontextPipeline
+#
+# "mock" runs a placeholder transform so you can click through the UI before
+# the real weights are in place. Replace it with your model id.
+model_id: mock
+pipeline_class: AutoPipelineForImage2Image
+
+# variant: fp16          # only if the repo ships fp16 weights
+# revision: main
+dtype: bf16              # bf16 | fp16 | fp32 | auto
+device: auto             # auto | cuda | cuda:1 | cpu
+
+# Memory options — enable as needed to fit your GPU.
+enable_attention_slicing: false
+enable_vae_slicing: false
+enable_xformers: false
+enable_model_cpu_offload: false   # much slower, but fits big models on small cards
+safety_checker: true              # false disables it on pipelines that have one
+
+# ----------------------------------------------------------- generation ----
+# Settings the loaded pipeline doesn't accept are dropped automatically, so
+# leaving an irrelevant one here is harmless. Set a value to `none` to omit it.
+num_inference_steps: 30
+guidance_scale: 7.5
+image_guidance_scale: 1.5   # instruct-pix2pix family; ignored elsewhere
+strength: none              # img2img family (0-1); ignored elsewhere
+negative_prompt: none
+seed: none                  # an integer makes runs reproducible
+
+# Anything here is passed straight through to the pipeline call.
+extra_pipeline_kwargs: {}
+
+# -------------------------------------------------------------- batching ----
+# "auto" times single vs batched inference on the first images of a run and
+# keeps whichever is faster. Pin an integer if you already know what fits.
+batch_size: auto
+auto_batch_max: 4
+max_side: 1024           # longest edge; `none` keeps the original size
+resize_multiple: 8
+output_format: png       # png | jpg | webp
+output_quality: 95
+
+# --------------------------------------------------------------- storage ----
+output_dir: outputs
+
+# ---------------------------------------------------------------- server ----
+host: 0.0.0.0            # required for vast.ai port mapping
+port: 7860
+share: false             # true creates a public gradio.live tunnel
+gallery_page_size: 60
+thumbnail_size: 384
+
+log_level: INFO

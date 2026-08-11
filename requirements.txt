@@ -1,0 +1,25 @@
+# Core app
+gradio>=4.44,<6
+Pillow>=10.0
+PyYAML>=6.0
+
+# Inference stack.
+# torch is intentionally unpinned here: vast.ai images ship a CUDA-matched build
+# already. If you need to install it yourself, pick the wheel for your CUDA
+# version first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.1
+diffusers>=0.31
+transformers>=4.44
+accelerate>=0.34
+safetensors>=0.4
+sentencepiece>=0.2       # required by some text encoders (T5, Gemma, ...)
+protobuf>=4.25           # ditto
+
+# Optional, uncomment if your model/GPU benefits:
+# xformers                 # memory-efficient attention (match your torch build)
+# peft>=0.13               # LoRA-adapted checkpoints
+# bitsandbytes>=0.44       # 8/4-bit quantisation
+
+# Dev
+pytest>=8.0

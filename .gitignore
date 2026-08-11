@@ -1,0 +1,21 @@
+# Outputs and caches
+outputs/
+.hf_cache/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.devvenv/
+.g4venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
