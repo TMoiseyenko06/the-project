@@ -15,10 +15,11 @@ accelerate>=0.34
 safetensors>=0.4
 sentencepiece>=0.2       # required by some text encoders (T5, Gemma, ...)
 protobuf>=4.25           # ditto
+peft>=0.13               # required if config.yaml sets `loras:` — diffusers'
+                         # load_lora_weights() raises without it installed
 
 # Optional, uncomment if your model/GPU benefits:
 # xformers                 # memory-efficient attention (match your torch build)
-# peft>=0.13               # LoRA-adapted checkpoints
 # bitsandbytes>=0.44       # 8/4-bit quantisation
 
 # Dev

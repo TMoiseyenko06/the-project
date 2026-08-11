@@ -10,6 +10,7 @@ raising.
 from __future__ import annotations
 
 import gc
+import importlib.util
 import inspect
 import logging
 import threading
@@ -221,6 +222,11 @@ class EditPipeline:
                 f"{self.config.pipeline_class} has no load_lora_weights method, so "
                 "it does not support the `loras` you configured. Remove them, or "
                 "switch to a pipeline that supports LoRA."
+            )
+        if importlib.util.find_spec("peft") is None:
+            raise ImportError(
+                "`loras` is configured but the `peft` package isn't installed — "
+                "diffusers needs it to apply LoRA weights. Run: pip install peft"
             )
         names: list[str] = []
         scales: list[float] = []

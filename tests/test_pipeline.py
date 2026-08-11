@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from typing import Any
 
 import pytest
@@ -173,6 +174,28 @@ class NoLoraPipe:
         return type("Out", (), {"images": []})()
 
 
+@pytest.fixture
+def peft_present(monkeypatch):
+    """Simulate `peft` being importable, regardless of what's actually installed.
+
+    _apply_loras checks importlib.util.find_spec("peft") directly (diffusers'
+    own is_peft_available() isn't reliable to depend on in a test — see the
+    real-world case this guards against: diffusers can report "PEFT backend
+    is required" even with peft installed, if some other dependency of peft
+    itself is broken). Tests exercising the loading logic shouldn't depend on
+    whether the real optional peft package happens to be installed on the
+    machine running them.
+    """
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "peft":
+            return object()  # any non-None value satisfies the `is None` check
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
 def test_apply_loras_noop_when_unconfigured() -> None:
     pipeline = EditPipeline(Config(model_id="mock", loras=[]))
     pipe = LoraCapablePipe()
@@ -183,7 +206,7 @@ def test_apply_loras_noop_when_unconfigured() -> None:
     assert pipe.adapters is None
 
 
-def test_apply_loras_loads_and_activates() -> None:
+def test_apply_loras_loads_and_activates(peft_present) -> None:
     config = Config(model_id="mock", loras=[
         {"repo_id": "someorg/style-lora", "scale": 0.7},
     ])
@@ -196,7 +219,7 @@ def test_apply_loras_loads_and_activates() -> None:
     assert pipe.adapters == (["lora_0"], [0.7])
 
 
-def test_apply_loras_default_scale_is_one() -> None:
+def test_apply_loras_default_scale_is_one(peft_present) -> None:
     config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
     pipeline = EditPipeline(config)
     pipe = LoraCapablePipe()
@@ -206,7 +229,7 @@ def test_apply_loras_default_scale_is_one() -> None:
     assert pipe.adapters == (["lora_0"], [1.0])
 
 
-def test_apply_loras_passes_weight_name_and_adapter_name() -> None:
+def test_apply_loras_passes_weight_name_and_adapter_name(peft_present) -> None:
     config = Config(model_id="mock", loras=[
         {"repo_id": "someorg/character-lora", "weight_name": "character.safetensors",
          "adapter_name": "character"},
@@ -222,7 +245,7 @@ def test_apply_loras_passes_weight_name_and_adapter_name() -> None:
     assert pipe.adapters == (["character"], [1.0])
 
 
-def test_apply_loras_stacks_multiple() -> None:
+def test_apply_loras_stacks_multiple(peft_present) -> None:
     config = Config(model_id="mock", loras=[
         {"repo_id": "someorg/style-lora", "scale": 0.8},
         {"repo_id": "someorg/character-lora", "scale": 0.5, "adapter_name": "character"},
@@ -237,6 +260,7 @@ def test_apply_loras_stacks_multiple() -> None:
 
 
 def test_apply_loras_rejects_unsupported_pipeline() -> None:
+    """Missing load_lora_weights is checked before peft — no need to mock peft here."""
     config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
     pipeline = EditPipeline(config)
 
@@ -244,7 +268,20 @@ def test_apply_loras_rejects_unsupported_pipeline() -> None:
         pipeline._apply_loras(NoLoraPipe())
 
 
-def test_apply_loras_without_set_adapters_still_loads() -> None:
+def test_apply_loras_requires_peft(monkeypatch) -> None:
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name, *a, **k: None if name == "peft" else real_find_spec(name, *a, **k)
+    )
+    config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
+    pipeline = EditPipeline(config)
+
+    with pytest.raises(ImportError, match="pip install peft"):
+        pipeline._apply_loras(LoraCapablePipe())
+
+
+def test_apply_loras_without_set_adapters_still_loads(peft_present) -> None:
     """A pipeline that can load LoRA weights but lacks set_adapters shouldn't crash."""
     class LoadOnlyPipe:
         def __init__(self):
