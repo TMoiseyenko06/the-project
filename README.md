@@ -4,8 +4,9 @@ Run a Hugging Face image-to-image editing model over hundreds of images with a
 single prompt, then browse, review and organise the results into albums — all
 from a web UI you can reach through vast.ai's port mapping.
 
-- **Run** — point at a folder or upload a zip, type one prompt, pick where the
-  results should land, watch progress.
+- **Run** — point at a folder, upload a zip, or pick individual photos (handy
+  from a phone), type one prompt, pick where the results should land, watch
+  progress.
 - **Gallery** — thumbnail grid, filter by album, multi-select, file into albums.
 - **Albums** — nest, rename, move, delete, download as zip.
 
@@ -39,7 +40,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 Verify the install:
 
 ```bash
-pytest -q          # 243 tests, no GPU required
+pytest -q          # 259 tests, no GPU required
 ```
 
 ## 2. Point it at your model
@@ -201,10 +202,17 @@ anyone with the link, and there is no login on this app — prefer SSH tunnellin
 ## 5. Using it
 
 ### Run tab
-Choose a **folder path** on the instance or upload a **zip**. Type one prompt,
-press *Run batch*. You get a live `X / N` count with ETA, and a summary listing
-successes, skips and a table of failures. *Stop* halts after the current image;
-whatever finished is kept and the next run picks up where it left off.
+Three ways to pick a source:
+- **Folder path** — a path on the instance itself.
+- **Zip upload** — a `.zip` of images.
+- **Upload images** — pick photos directly, no zip or folder needed. This is
+  the one to use from a phone: tapping it opens the device's native photo
+  picker, which supports multi-select straight from the camera roll.
+
+Type one prompt, press *Run batch*. You get a live `X / N` count with ETA, and
+a summary listing successes, skips and a table of failures. *Stop* halts after
+the current image; whatever finished is kept and the next run picks up where
+it left off.
 
 **Send results to** decides where this batch lands. Leave it on *Unsorted* for
 the default behaviour, pick an existing album, or type a name under *…or create
@@ -364,7 +372,7 @@ imagebatch/
   manifest.py             resume records
   thumbnails.py           cached gallery thumbnails
   ui/                     Gradio layer, one module per tab
-tests/                    243 tests, no GPU needed
+tests/                    259 tests, no GPU needed
 ```
 
 Inference, storage and UI are separate layers: `storage.py` and `batch.py` have

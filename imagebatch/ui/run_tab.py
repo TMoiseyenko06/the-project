@@ -6,7 +6,7 @@ import logging
 
 import gradio as gr
 
-from ..batch import BatchError, describe_progress
+from ..batch import BatchError, describe_progress, stage_uploads
 from ..storage import UNSORTED, StorageError
 from .common import TOP_LEVEL, album_choices, parent_value
 from .context import AppContext
@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 FOLDER_MODE = "Folder path"
 ZIP_MODE = "Zip upload"
+UPLOAD_MODE = "Upload images"
 
 
 def build_run_tab(ctx: AppContext) -> dict:
@@ -32,7 +33,8 @@ def build_run_tab(ctx: AppContext) -> dict:
     with gr.Row():
         with gr.Column(scale=1):
             source_mode = gr.Radio(
-                choices=[FOLDER_MODE, ZIP_MODE], value=FOLDER_MODE, label="Image source",
+                choices=[FOLDER_MODE, ZIP_MODE, UPLOAD_MODE], value=FOLDER_MODE,
+                label="Image source",
             )
             folder_input = gr.Textbox(
                 label="Folder path",
@@ -41,6 +43,12 @@ def build_run_tab(ctx: AppContext) -> dict:
             )
             zip_input = gr.File(
                 label="Zip file", file_types=[".zip"], type="filepath", visible=False,
+            )
+            images_input = gr.File(
+                label="Images", file_count="multiple", file_types=["image"],
+                type="filepath", visible=False,
+                # On a phone this opens the native photo picker, which supports
+                # multi-select straight from the camera roll or camera.
             )
             prompt_input = gr.Textbox(
                 label="Prompt", lines=3,
@@ -84,13 +92,25 @@ def build_run_tab(ctx: AppContext) -> dict:
 
     def toggle_source(mode: str):
         return (gr.update(visible=mode == FOLDER_MODE),
-                gr.update(visible=mode == ZIP_MODE))
+                gr.update(visible=mode == ZIP_MODE),
+                gr.update(visible=mode == UPLOAD_MODE))
 
-    source_mode.change(toggle_source, inputs=source_mode, outputs=[folder_input, zip_input])
+    source_mode.change(toggle_source, inputs=source_mode,
+                       outputs=[folder_input, zip_input, images_input])
 
-    def run_batch(mode, folder, zip_path, prompt, target, new_name, new_parent,
+    def run_batch(mode, folder, zip_path, images, prompt, target, new_name, new_parent,
                   resume, recursive, progress=gr.Progress()):
-        source = folder if mode == FOLDER_MODE else zip_path
+        if mode == UPLOAD_MODE:
+            if not images:
+                yield "❌ Choose one or more images first.", ""
+                return
+            try:
+                source = stage_uploads(images, ctx.store.staging_dir)
+            except BatchError as exc:
+                yield f"❌ {exc}", ""
+                return
+        else:
+            source = folder if mode == FOLDER_MODE else zip_path
         if not source:
             yield "❌ Choose a folder or upload a zip first.", ""
             return
@@ -124,8 +144,9 @@ def build_run_tab(ctx: AppContext) -> dict:
 
     run_event = run_button.click(
         run_batch,
-        inputs=[source_mode, folder_input, zip_input, prompt_input, target_album,
-                new_album_name, new_album_parent, resume_input, recursive_input],
+        inputs=[source_mode, folder_input, zip_input, images_input, prompt_input,
+                target_album, new_album_name, new_album_parent, resume_input,
+                recursive_input],
         outputs=[status, summary],
         concurrency_limit=1,  # one GPU, one batch at a time
     )

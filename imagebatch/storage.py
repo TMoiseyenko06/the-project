@@ -93,6 +93,25 @@ def unique_path(directory: Path, filename: str) -> Path:
     raise StorageError(f"could not find a free filename for {filename} in {directory}")
 
 
+def unique_dir(parent: Path, base: str) -> Path:
+    """Create and return a non-colliding directory ``parent/base`` (or `base_N`).
+
+    Used for per-run staging folders keyed by a timestamp, where two calls in
+    the same wall-clock second must not be allowed to merge into one folder.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    candidate = parent / base
+    if not candidate.exists():
+        candidate.mkdir(parents=True)
+        return candidate
+    for i in range(1, 10_000):
+        candidate = parent / f"{base}_{i}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True)
+            return candidate
+    raise StorageError(f"could not find a free directory name for {base} in {parent}")
+
+
 @dataclass
 class Album:
     slug: str

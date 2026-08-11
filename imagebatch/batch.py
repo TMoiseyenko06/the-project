@@ -28,7 +28,7 @@ from PIL import Image, UnidentifiedImageError
 from .config import Config
 from .manifest import Manifest, hash_file
 from .pipeline import EditPipeline, OutOfMemoryError
-from .storage import UNSORTED, AlbumStore, StorageError, is_image, unique_path
+from .storage import UNSORTED, AlbumStore, StorageError, is_image, unique_dir, unique_path
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +132,32 @@ def extract_zip(zip_path: Path, dest: Path) -> list[Path]:
     return extracted
 
 
+def stage_uploads(paths: Sequence[str | Path], staging_dir: Path) -> Path:
+    """Copy individually-uploaded images into a fresh folder and return it.
+
+    Lets a batch of separately-picked files (e.g. a phone's multi-select photo
+    picker, which has no folder or zip to point at) reuse the same
+    folder-processing path as ``--cli /some/folder``, instead of needing a
+    second code path through the runner.
+    """
+    # unique_dir guards against two uploads landing in the same wall-clock
+    # second merging into one folder, which would silently combine batches.
+    target = unique_dir(staging_dir, f"upload_{int(time.time())}")
+    staged: list[Path] = []
+    for raw in paths:
+        src = Path(raw)
+        if not src.is_file() or not is_image(src):
+            log.warning("Skipping non-image upload: %s", src.name)
+            continue
+        dst = unique_path(target, src.name)
+        shutil.copy2(src, dst)
+        staged.append(dst)
+    if not staged:
+        raise BatchError("no valid images were uploaded")
+    log.info("Staged %d uploaded image(s) in %s", len(staged), target)
+    return target
+
+
 def discover_images(source: str | Path, staging_dir: Path, recursive: bool = True) -> list[Path]:
     """Collect image paths from a folder, a zip file, or a single image."""
     path = Path(str(source)).expanduser()
@@ -140,7 +166,7 @@ def discover_images(source: str | Path, staging_dir: Path, recursive: bool = Tru
 
     if path.is_file():
         if path.suffix.lower() == ".zip":
-            target = staging_dir / f"zip_{int(time.time())}_{path.stem[:40]}"
+            target = unique_dir(staging_dir, f"zip_{int(time.time())}_{path.stem[:40]}")
             images = extract_zip(path, target)
             if not images:
                 raise BatchError(f"no images found inside {path.name}")

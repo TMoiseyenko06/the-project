@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from imagebatch.storage import UNSORTED, AlbumStore, StorageError, slugify, unique_path
+from imagebatch.storage import (UNSORTED, AlbumStore, StorageError, slugify, unique_dir,
+                                unique_path)
 from tests.conftest import make_image
 
 
@@ -226,6 +227,31 @@ def test_unique_path(tmp_path: Path) -> None:
     make_image(tmp_path / "a.png")
     assert unique_path(tmp_path, "a.png").name == "a_1.png"
     assert unique_path(tmp_path, "b.png").name == "b.png"
+
+
+def test_unique_dir_creates_when_free(tmp_path: Path) -> None:
+    result = unique_dir(tmp_path, "batch")
+    assert result == tmp_path / "batch"
+    assert result.is_dir()
+
+
+def test_unique_dir_avoids_collision(tmp_path: Path) -> None:
+    first = unique_dir(tmp_path, "batch")
+    second = unique_dir(tmp_path, "batch")
+
+    assert first != second
+    assert second == tmp_path / "batch_1"
+    assert first.is_dir() and second.is_dir()
+
+
+def test_unique_dir_repeated_collisions(tmp_path: Path) -> None:
+    names = {unique_dir(tmp_path, "batch") for _ in range(5)}
+    assert len(names) == 5  # every call gets a genuinely distinct directory
+
+
+def test_unique_dir_creates_parent(tmp_path: Path) -> None:
+    result = unique_dir(tmp_path / "nested" / "staging", "batch")
+    assert result.is_dir()
 
 
 def test_store_survives_reopen(tmp_path: Path) -> None:

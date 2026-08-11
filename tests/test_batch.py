@@ -547,3 +547,98 @@ def test_no_resume_writes_to_the_new_album(config: Config, source_dir: Path) -> 
 
     assert again.succeeded == 4
     assert len(store.list_images(second.slug)) == 4
+
+
+# -- individual image uploads ----------------------------------------------
+def test_stage_uploads_copies_into_fresh_folder(tmp_path: Path) -> None:
+    from imagebatch.batch import stage_uploads
+
+    uploads = tmp_path / "phone"
+    paths = [make_image(uploads / f"IMG_{i}.jpg") for i in range(3)]
+    staging = tmp_path / "staging"
+
+    folder = stage_uploads(paths, staging)
+
+    assert folder.parent == staging
+    assert sorted(p.name for p in folder.iterdir()) == ["IMG_0.jpg", "IMG_1.jpg", "IMG_2.jpg"]
+    # originals must be untouched (copy, not move) — a browser upload's temp
+    # file may be needed elsewhere or cleaned up independently
+    for path in paths:
+        assert path.is_file()
+
+
+def test_stage_uploads_skips_non_images(tmp_path: Path) -> None:
+    from imagebatch.batch import stage_uploads
+
+    uploads = tmp_path / "phone"
+    good = make_image(uploads / "a.jpg")
+    bad = uploads / "notes.txt"
+    bad.write_text("hello")
+    staging = tmp_path / "staging"
+
+    folder = stage_uploads([good, bad], staging)
+
+    assert [p.name for p in folder.iterdir()] == ["a.jpg"]
+
+
+def test_stage_uploads_rejects_empty_result(tmp_path: Path) -> None:
+    from imagebatch.batch import stage_uploads
+
+    bad = tmp_path / "notes.txt"
+    bad.write_text("hello")
+
+    with pytest.raises(BatchError, match="no valid images"):
+        stage_uploads([bad], tmp_path / "staging")
+
+
+def test_stage_uploads_handles_name_collisions(tmp_path: Path) -> None:
+    """Two uploaded files sharing a name (e.g. both called IMG_0.jpg) both survive."""
+    from imagebatch.batch import stage_uploads
+
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    a = make_image(dir_a / "IMG_0.jpg", color="red")
+    b = make_image(dir_b / "IMG_0.jpg", color="blue")
+    staging = tmp_path / "staging"
+
+    folder = stage_uploads([a, b], staging)
+
+    assert len(list(folder.iterdir())) == 2
+
+
+def test_uploaded_batch_runs_end_to_end(config: Config, tmp_path: Path) -> None:
+    from imagebatch.batch import stage_uploads
+
+    uploads = tmp_path / "phone"
+    paths = [make_image(uploads / f"IMG_{i}.jpg") for i in range(3)]
+    store = AlbumStore(config.output_path)
+    folder = stage_uploads(paths, store.staging_dir)
+
+    final = run_to_completion(build_runner(config, store), folder, "prompt")
+
+    assert final.succeeded == 3
+    assert len(store.list_unsorted()) == 3
+
+
+def test_uploaded_batch_resumes_on_content(config: Config, tmp_path: Path) -> None:
+    """Re-uploading the same photos (new temp paths, same bytes) still dedupes."""
+    from imagebatch.batch import stage_uploads
+
+    uploads = tmp_path / "phone"
+    paths = [make_image(uploads / f"IMG_{i}.jpg", color="red") for i in range(2)]
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    first_folder = stage_uploads(paths, store.staging_dir)
+    run_to_completion(runner, first_folder, "prompt")
+
+    # Simulate a second upload of the identical photos from the phone: same
+    # bytes, brand new temp filenames/paths as a browser would produce.
+    reupload = tmp_path / "phone2"
+    same_content_paths = [make_image(reupload / f"photo_{i}.jpg", color="red")
+                          for i in range(2)]
+    second_folder = stage_uploads(same_content_paths, store.staging_dir)
+
+    second = run_to_completion(runner, second_folder, "prompt")
+
+    assert second.skipped == 2
+    assert second.succeeded == 0
