@@ -36,6 +36,20 @@ enable_xformers: false
 enable_model_cpu_offload: false   # much slower, but fits big models on small cards
 safety_checker: true              # false disables it on pipelines that have one
 
+# LoRA adapters applied on top of the base model after it loads. Leave empty for
+# none. `repo_id` is required; `weight_name` is only needed if that repo hosts
+# more than one weights file; `scale` defaults to 1.0; `adapter_name` is
+# auto-generated if omitted. Requires a pipeline_class that supports LoRA
+# (load_lora_weights) — most modern diffusers pipelines do.
+loras: []
+# loras:
+#   - repo_id: someorg/style-lora
+#     scale: 0.8
+#   - repo_id: someorg/character-lora
+#     weight_name: character.safetensors   # only if the repo has several files
+#     adapter_name: character
+#     scale: 1.0
+
 # ----------------------------------------------------------- generation ----
 # Settings the loaded pipeline doesn't accept are dropped automatically, so
 # leaving an irrelevant one here is harmless. Set a value to `none` to omit it.

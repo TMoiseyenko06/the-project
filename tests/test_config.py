@@ -123,3 +123,53 @@ def test_signature_changes_with_settings() -> None:
 def test_signature_ignores_non_visual_settings() -> None:
     """Changing the port must not invalidate finished work."""
     assert Config(port=1).signature() == Config(port=2).signature()
+
+
+# -- LoRA config ------------------------------------------------------------
+def test_loras_default_empty() -> None:
+    assert Config().loras == []
+
+
+def test_loras_from_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "loras:\n"
+        "  - repo_id: someorg/style-lora\n"
+        "    scale: 0.8\n"
+        "  - repo_id: someorg/character-lora\n"
+        "    weight_name: character.safetensors\n"
+        "    adapter_name: character\n"
+    )
+
+    config = load_config(path)
+
+    assert config.loras == [
+        {"repo_id": "someorg/style-lora", "scale": 0.8},
+        {"repo_id": "someorg/character-lora", "weight_name": "character.safetensors",
+         "adapter_name": "character"},
+    ]
+
+
+def test_lora_missing_repo_id_rejected() -> None:
+    with pytest.raises(ValueError, match="repo_id"):
+        Config(loras=[{"scale": 1.0}])
+
+
+def test_lora_empty_repo_id_rejected() -> None:
+    with pytest.raises(ValueError, match="repo_id"):
+        Config(loras=[{"repo_id": "  "}])
+
+
+def test_lora_non_dict_entry_rejected() -> None:
+    with pytest.raises(ValueError, match="repo_id"):
+        Config(loras=["someorg/style-lora"])
+
+
+def test_signature_changes_with_loras() -> None:
+    base = Config(model_id="a", loras=[])
+    with_lora = Config(model_id="a", loras=[{"repo_id": "someorg/style-lora"}])
+    different_scale = Config(model_id="a", loras=[{"repo_id": "someorg/style-lora",
+                                                    "scale": 0.5}])
+
+    assert base.signature() != with_lora.signature()
+    assert with_lora.signature() != different_scale.signature()

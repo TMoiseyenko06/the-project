@@ -39,7 +39,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 Verify the install:
 
 ```bash
-pytest -q          # 228 tests, no GPU required
+pytest -q          # 243 tests, no GPU required
 ```
 
 ## 2. Point it at your model
@@ -60,7 +60,8 @@ class the model card names. Some common ones:
 | InstructPix2Pix | `StableDiffusionInstructPix2PixPipeline` |
 | SDXL img2img | `StableDiffusionXLImg2ImgPipeline` |
 | FLUX Kontext | `FluxKontextPipeline` |
-| Qwen-Image-Edit | `QwenImageEditPipeline` |
+| Qwen-Image-Edit (original) | `QwenImageEditPipeline` |
+| Qwen-Image-Edit-2509 / -2511 | `QwenImageEditPlusPipeline` — needs diffusers installed from GitHub main, not the last PyPI release: `pip install "git+https://github.com/huggingface/diffusers.git"` |
 
 Everything can also be set by environment variable with an `IMGBATCH_` prefix,
 which beats the file:
@@ -97,6 +98,37 @@ enable_xformers: true           # needs a matching xformers build
 enable_model_cpu_offload: true  # last resort: fits big models, much slower
 max_side: 1024                  # downscale huge inputs before inference
 ```
+
+### LoRA adapters
+
+Layer one or more LoRAs on top of the base model in `config.yaml`:
+
+```yaml
+loras:
+  - repo_id: someorg/style-lora
+    scale: 0.8
+  - repo_id: someorg/character-lora
+    weight_name: character.safetensors   # only if that repo hosts several files
+    adapter_name: character              # optional; auto-generated if omitted
+    scale: 1.0
+```
+
+Each is loaded once at startup via the pipeline's `load_lora_weights` and
+activated with `set_adapters`, so every image in a batch already has them
+applied — nothing extra happens per call. This needs a `pipeline_class` that
+supports LoRA (`load_lora_weights` / `set_adapters`); most modern diffusers
+pipelines do, but if yours doesn't, startup fails with a clear error naming the
+pipeline class rather than silently ignoring the adapters.
+
+A LoRA repo is **not** a complete model — it has no `model_index.json` and
+can't be used as `model_id` on its own. If you point `model_id` at a LoRA repo
+directly you'll get `OSError: ... does not appear to have a file named
+model_index.json`; the LoRA goes in `loras:`, the base model stays in
+`model_id`.
+
+Changing `loras` (adding one, changing its scale, swapping the repo) is a
+visual setting, so it invalidates the resume manifest the same way changing the
+prompt does — affected images are reprocessed, not silently skipped.
 
 ### Try it before the weights land
 
@@ -332,7 +364,7 @@ imagebatch/
   manifest.py             resume records
   thumbnails.py           cached gallery thumbnails
   ui/                     Gradio layer, one module per tab
-tests/                    228 tests, no GPU needed
+tests/                    243 tests, no GPU needed
 ```
 
 Inference, storage and UI are separate layers: `storage.py` and `batch.py` have

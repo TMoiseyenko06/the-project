@@ -147,3 +147,129 @@ def test_describe_reports_state() -> None:
     assert "not loaded" in pipeline.describe()
     pipeline.load()
     assert "mock" in pipeline.describe()
+
+
+# -- LoRA application -------------------------------------------------------
+class LoraCapablePipe:
+    """Stands in for a diffusers pipeline that supports the PEFT LoRA API."""
+
+    def __init__(self) -> None:
+        self.loaded: list[tuple[str, dict]] = []
+        self.adapters: tuple[list[str], list[float]] | None = None
+
+    def load_lora_weights(self, repo_id, **kwargs):
+        self.loaded.append((repo_id, kwargs))
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.adapters = (list(names), list(adapter_weights or []))
+
+
+class NoLoraPipe:
+    """Stands in for a pipeline with no LoRA support at all."""
+
+    def __call__(self, *args, **kwargs):
+        return type("Out", (), {"images": []})()
+
+
+def test_apply_loras_noop_when_unconfigured() -> None:
+    pipeline = EditPipeline(Config(model_id="mock", loras=[]))
+    pipe = LoraCapablePipe()
+
+    pipeline._apply_loras(pipe)
+
+    assert pipe.loaded == []
+    assert pipe.adapters is None
+
+
+def test_apply_loras_loads_and_activates() -> None:
+    config = Config(model_id="mock", loras=[
+        {"repo_id": "someorg/style-lora", "scale": 0.7},
+    ])
+    pipeline = EditPipeline(config)
+    pipe = LoraCapablePipe()
+
+    pipeline._apply_loras(pipe)
+
+    assert pipe.loaded == [("someorg/style-lora", {"adapter_name": "lora_0"})]
+    assert pipe.adapters == (["lora_0"], [0.7])
+
+
+def test_apply_loras_default_scale_is_one() -> None:
+    config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
+    pipeline = EditPipeline(config)
+    pipe = LoraCapablePipe()
+
+    pipeline._apply_loras(pipe)
+
+    assert pipe.adapters == (["lora_0"], [1.0])
+
+
+def test_apply_loras_passes_weight_name_and_adapter_name() -> None:
+    config = Config(model_id="mock", loras=[
+        {"repo_id": "someorg/character-lora", "weight_name": "character.safetensors",
+         "adapter_name": "character"},
+    ])
+    pipeline = EditPipeline(config)
+    pipe = LoraCapablePipe()
+
+    pipeline._apply_loras(pipe)
+
+    assert pipe.loaded == [("someorg/character-lora",
+                            {"adapter_name": "character",
+                             "weight_name": "character.safetensors"})]
+    assert pipe.adapters == (["character"], [1.0])
+
+
+def test_apply_loras_stacks_multiple() -> None:
+    config = Config(model_id="mock", loras=[
+        {"repo_id": "someorg/style-lora", "scale": 0.8},
+        {"repo_id": "someorg/character-lora", "scale": 0.5, "adapter_name": "character"},
+    ])
+    pipeline = EditPipeline(config)
+    pipe = LoraCapablePipe()
+
+    pipeline._apply_loras(pipe)
+
+    assert [repo for repo, _ in pipe.loaded] == ["someorg/style-lora", "someorg/character-lora"]
+    assert pipe.adapters == (["lora_0", "character"], [0.8, 0.5])
+
+
+def test_apply_loras_rejects_unsupported_pipeline() -> None:
+    config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
+    pipeline = EditPipeline(config)
+
+    with pytest.raises(AttributeError, match="does not support"):
+        pipeline._apply_loras(NoLoraPipe())
+
+
+def test_apply_loras_without_set_adapters_still_loads() -> None:
+    """A pipeline that can load LoRA weights but lacks set_adapters shouldn't crash."""
+    class LoadOnlyPipe:
+        def __init__(self):
+            self.loaded = []
+
+        def load_lora_weights(self, repo_id, **kwargs):
+            self.loaded.append(repo_id)
+
+    config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
+    pipeline = EditPipeline(config)
+    pipe = LoadOnlyPipe()
+
+    pipeline._apply_loras(pipe)  # must not raise
+
+    assert pipe.loaded == ["someorg/style-lora"]
+
+
+def test_describe_reports_lora_count() -> None:
+    config = Config(model_id="mock", loras=[{"repo_id": "someorg/style-lora"}])
+    pipeline = EditPipeline(config)
+    pipeline.load()
+
+    assert "1 LoRA" in pipeline.describe()
+
+
+def test_describe_omits_lora_when_unconfigured() -> None:
+    pipeline = EditPipeline(Config(model_id="mock"))
+    pipeline.load()
+
+    assert "LoRA" not in pipeline.describe()

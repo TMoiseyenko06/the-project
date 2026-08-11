@@ -68,6 +68,11 @@ class Config:
     negative_prompt: str | None = None
     seed: int | None = None  # None => nondeterministic
     extra_pipeline_kwargs: dict[str, Any] = field(default_factory=dict)
+    # LoRA adapters applied on top of the base model after it loads. Each entry
+    # needs `repo_id`; `weight_name` is only required if that repo hosts more
+    # than one weights file, `scale` defaults to 1.0, `adapter_name` is
+    # auto-generated if omitted. Ignored while model_id is "mock".
+    loras: list[dict[str, Any]] = field(default_factory=list)
 
     # --- batching / images ----------------------------------------------
     # "auto" benchmarks single vs batched inference on the first images of a run
@@ -105,6 +110,11 @@ class Config:
             raise ValueError("batch_size must be >= 1")
         if self.auto_batch_max < 1:
             raise ValueError("auto_batch_max must be >= 1")
+        for entry in self.loras:
+            if not isinstance(entry, dict) or not str(entry.get("repo_id") or "").strip():
+                raise ValueError(
+                    f"each entry in `loras` needs a repo_id, got {entry!r}"
+                )
 
     # -- derived helpers --------------------------------------------------
     @property
@@ -140,6 +150,7 @@ class Config:
             "pipeline_class": self.pipeline_class,
             "dtype": self.dtype,
             "max_side": self.max_side,
+            "loras": self.loras,
             **self.generation_kwargs(),
         }
 

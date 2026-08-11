@@ -178,6 +178,7 @@ class EditPipeline:
             else:
                 pipe = pipe.to(self.device)
 
+            self._apply_loras(pipe)
             self._apply_memory_options(pipe)
             if hasattr(pipe, "set_progress_bar_config"):
                 pipe.set_progress_bar_config(disable=True)
@@ -185,6 +186,40 @@ class EditPipeline:
             self.pipe = pipe
             self._inspect_signature()
             log.info("Model ready in %.1fs", time.time() - started)
+
+    def _apply_loras(self, pipe: Any) -> None:
+        """Load and activate the configured LoRA adapters, if any.
+
+        Applied once at load time (not per call): diffusers bakes the adapter
+        into the pipeline's PEFT layers via ``load_lora_weights`` /
+        ``set_adapters``, so every subsequent inference in the batch already
+        uses it.
+        """
+        loras = self.config.loras
+        if not loras:
+            return
+        if not hasattr(pipe, "load_lora_weights"):
+            raise AttributeError(
+                f"{self.config.pipeline_class} has no load_lora_weights method, so "
+                "it does not support the `loras` you configured. Remove them, or "
+                "switch to a pipeline that supports LoRA."
+            )
+        names: list[str] = []
+        scales: list[float] = []
+        for i, lora in enumerate(loras):
+            adapter_name = str(lora.get("adapter_name") or f"lora_{i}")
+            kwargs: dict[str, Any] = {"adapter_name": adapter_name}
+            if lora.get("weight_name"):
+                kwargs["weight_name"] = lora["weight_name"]
+            log.info("Loading LoRA %r as adapter %r", lora["repo_id"], adapter_name)
+            pipe.load_lora_weights(lora["repo_id"], **kwargs)
+            names.append(adapter_name)
+            scales.append(float(lora.get("scale", 1.0)))
+        if hasattr(pipe, "set_adapters"):
+            pipe.set_adapters(names, adapter_weights=scales)
+        else:
+            log.warning("Pipeline has no set_adapters; LoRA `scale` settings were ignored "
+                        "(adapters loaded at their default weight)")
 
     def _apply_memory_options(self, pipe: Any) -> None:
         cfg = self.config
@@ -343,7 +378,8 @@ class EditPipeline:
         if not self.loaded:
             return f"{cfg.model_id} (not loaded)"
         where = self.device if not cfg.enable_model_cpu_offload else f"{self.device} + cpu offload"
-        return f"{cfg.model_id} · {cfg.pipeline_class} · {cfg.dtype} · {where}"
+        suffix = f" · {len(cfg.loras)} LoRA(s)" if cfg.loras else ""
+        return f"{cfg.model_id} · {cfg.pipeline_class} · {cfg.dtype} · {where}{suffix}"
 
     def unload(self) -> None:
         with self._lock:
