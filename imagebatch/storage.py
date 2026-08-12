@@ -137,6 +137,11 @@ class AlbumStore:
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         if not self.albums_file.exists():
             atomic_write_json(self.albums_file, {"version": SCHEMA_VERSION, "albums": {}})
+        # Deferred import: tags.py imports from this module, so importing it at
+        # module level here would be circular. By __init__ time storage.py is
+        # already fully loaded, so this resolves fine.
+        from .tags import TagStore
+        self.tags = TagStore(self.root / "tags.json")
 
     # -- paths ------------------------------------------------------------
     @property
@@ -525,9 +530,11 @@ class AlbumStore:
                             continue
                         if delete_images:
                             path.unlink()
+                            self.tags.forget_image(target, path.name)
                         else:
-                            shutil.move(str(path),
-                                        str(unique_path(self.unsorted_dir, path.name)))
+                            dest = unique_path(self.unsorted_dir, path.name)
+                            shutil.move(str(path), str(dest))
+                            self.tags.rename_image(target, path.name, None, dest.name)
                         affected += 1
                     shutil.rmtree(directory, ignore_errors=True)
                 del data["albums"][target]
@@ -571,6 +578,7 @@ class AlbumStore:
                 dst = unique_path(target_dir, name)
                 shutil.move(str(src), str(dst))
                 moved.append(dst.name)
+                self.tags.rename_image(source_album, name, target_album, dst.name)
                 if source_key != UNSORTED:
                     images = data["albums"][source_key]["images"]
                     if name in images:
@@ -595,6 +603,7 @@ class AlbumStore:
                 if path.is_file():
                     path.unlink()
                     removed += 1
+                    self.tags.forget_image(album, name)
                 if key != UNSORTED and name in data["albums"].get(key, {}).get("images", []):
                     data["albums"][key]["images"].remove(name)
             self._write(data)
