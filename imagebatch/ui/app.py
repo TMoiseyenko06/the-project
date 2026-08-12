@@ -7,10 +7,10 @@ import logging
 import gradio as gr
 
 from ..config import Config
-from .albums_tab import build_albums_tab
 from .context import AppContext
 from .gallery_tab import build_gallery_tab
 from .run_tab import build_run_tab
+from .tags_tab import build_tags_tab
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +32,8 @@ def build_ui(config: Config) -> tuple[gr.Blocks, AppContext]:
                 run = build_run_tab(ctx)
             with gr.TabItem("Gallery") as gallery_tab_item:
                 gallery = build_gallery_tab(ctx)
-            with gr.TabItem("Albums") as albums_tab_item:
-                albums = build_albums_tab(ctx)
+            with gr.TabItem("Tags") as tags_tab_item:
+                tags = build_tags_tab(ctx)
 
         # Switching to a tab re-reads from disk, so results from a run that just
         # finished (or edits made in another tab) show up without a manual refresh.
@@ -41,8 +41,8 @@ def build_ui(config: Config) -> tuple[gr.Blocks, AppContext]:
                             outputs=run["refresh_outputs"])
         gallery_tab_item.select(gallery["refresh"], inputs=gallery["inputs"],
                                 outputs=gallery["outputs"])
-        albums_tab_item.select(lambda value: albums["render"](value),
-                               inputs=albums["inputs"], outputs=albums["outputs"])
+        tags_tab_item.select(tags["refresh"], inputs=tags["inputs"],
+                             outputs=tags["outputs"])
         demo.load(gallery["refresh"], inputs=gallery["inputs"], outputs=gallery["outputs"])
 
     return demo, ctx

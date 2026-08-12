@@ -7,6 +7,7 @@ import logging
 import gradio as gr
 
 from ..batch import BatchError, describe_progress, stage_uploads
+from ..prompts import find_preset
 from ..storage import UNSORTED, StorageError
 from .common import TOP_LEVEL, album_choices, parent_value
 from .context import AppContext
@@ -16,6 +17,57 @@ log = logging.getLogger(__name__)
 FOLDER_MODE = "Folder path"
 ZIP_MODE = "Zip upload"
 UPLOAD_MODE = "Upload images"
+NO_PRESET = "— none —"
+
+
+def preset_choices(ctx: AppContext) -> list[str]:
+    return [NO_PRESET] + [p.name for p in ctx.presets]
+
+
+def preset_status(ctx: AppContext) -> str:
+    if ctx.preset_error:
+        return f"⚠️ `prompts.json`: {ctx.preset_error}"
+    if not ctx.presets:
+        return ("_No presets. Create a `prompts.json` with "
+                "`[{\"name\": ..., \"prompt\": ..., \"tags\": {...}}]` to add some._")
+    return f"_{len(ctx.presets)} preset(s) loaded._"
+
+
+def parse_manual_tags(text: str) -> dict[str, list[str]]:
+    """Parse ``"pose=Sitting, style=b&w"`` into ``{"pose": ["Sitting"], ...}``.
+
+    Repeating a category accumulates values rather than overwriting, so
+    ``person=Alex, person=Jordan`` tags both.
+    """
+    tags: dict[str, list[str]] = {}
+    for chunk in (text or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(
+                f"tag {chunk!r} must be in category=value form (e.g. pose=Sitting)")
+        category, _, value = chunk.partition("=")
+        category, value = category.strip().lower(), value.strip()
+        if not category or not value:
+            raise ValueError(
+                f"tag {chunk!r} must be in category=value form (e.g. pose=Sitting)")
+        tags.setdefault(category, [])
+        if value not in tags[category]:
+            tags[category].append(value)
+    return tags
+
+
+def merge_tags(*sources: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Combine tag dicts, unioning values per category (later never clobbers earlier)."""
+    merged: dict[str, list[str]] = {}
+    for source in sources:
+        for category, values in (source or {}).items():
+            merged.setdefault(category, [])
+            for value in values:
+                if value not in merged[category]:
+                    merged[category].append(value)
+    return merged
 
 
 def build_run_tab(ctx: AppContext) -> dict:
@@ -50,11 +102,34 @@ def build_run_tab(ctx: AppContext) -> dict:
                 # On a phone this opens the native photo picker, which supports
                 # multi-select straight from the camera roll or camera.
             )
+            with gr.Group():
+                gr.Markdown("**Preset**")
+                with gr.Row():
+                    preset_picker = gr.Dropdown(
+                        choices=preset_choices(ctx), value=NO_PRESET, label="Prompt preset",
+                        interactive=True, scale=3,
+                        info="Fills in the prompt and applies its tags to every result.",
+                    )
+                    reload_presets_button = gr.Button("↻", scale=1,
+                                                      min_width=48)
+                preset_note = gr.Markdown(preset_status(ctx))
             prompt_input = gr.Textbox(
                 label="Prompt", lines=3,
                 placeholder="e.g. make it look like a watercolour painting",
                 info="Applied to every image in the batch.",
             )
+            with gr.Group():
+                gr.Markdown("**Tag these results**")
+                manual_tags = gr.Textbox(
+                    label="Tags", placeholder="pose=Sitting, style=b&w",
+                    info="category=value pairs, comma separated. Applied to every "
+                         "image in this batch, on top of any preset tags.",
+                )
+                detect_faces = gr.Checkbox(
+                    value=False, label="Detect faces and auto-tag people",
+                    info="Groups the same face across runs under a stable id you "
+                         "can name later in the Tags tab. Needs `insightface`.",
+                )
             with gr.Group():
                 gr.Markdown("**Send results to**")
                 target_album = gr.Dropdown(
@@ -98,8 +173,29 @@ def build_run_tab(ctx: AppContext) -> dict:
     source_mode.change(toggle_source, inputs=source_mode,
                        outputs=[folder_input, zip_input, images_input])
 
+    def apply_preset(name):
+        """Fill the prompt from the chosen preset (its tags apply at run time)."""
+        preset = find_preset(ctx.presets, name or "")
+        if preset is None:
+            return gr.update(), gr.update(value="")
+        summary = ", ".join(f"`{c}={v}`" for c, values in preset.tags.items()
+                            for v in values)
+        return (gr.update(value=preset.prompt),
+                gr.update(value=f"Tags from preset: {summary}" if summary
+                          else "_This preset has no tags._"))
+
+    def reload_presets():
+        ctx.reload_presets()
+        return (gr.update(choices=preset_choices(ctx), value=NO_PRESET),
+                gr.update(value=preset_status(ctx)))
+
+    preset_picker.change(apply_preset, inputs=preset_picker,
+                         outputs=[prompt_input, preset_note])
+    reload_presets_button.click(reload_presets, outputs=[preset_picker, preset_note])
+
     def run_batch(mode, folder, zip_path, images, prompt, target, new_name, new_parent,
-                  resume, recursive, progress=gr.Progress()):
+                  resume, recursive, preset_name, manual_tag_text, want_faces,
+                  progress=gr.Progress()):
         if mode == UPLOAD_MODE:
             if not images:
                 yield "❌ Choose one or more images first.", ""
@@ -126,10 +222,19 @@ def build_run_tab(ctx: AppContext) -> dict:
                 yield f"❌ {exc}", ""
                 return
 
+        try:
+            manual = parse_manual_tags(manual_tag_text)
+        except ValueError as exc:
+            yield f"❌ {exc}", ""
+            return
+        preset = find_preset(ctx.presets, preset_name or "")
+        batch_tags = merge_tags(preset.tags if preset else {}, manual)
+
         yield "Starting…", ""
         try:
             for update in ctx.runner.run(source, prompt, resume=resume,
-                                         recursive=recursive, target_album=target):
+                                         recursive=recursive, target_album=target,
+                                         tags=batch_tags, detect_faces=want_faces):
                 if update.total:
                     progress(update.fraction, desc=f"{update.done}/{update.total}")
                 if update.finished:
@@ -146,7 +251,7 @@ def build_run_tab(ctx: AppContext) -> dict:
         run_batch,
         inputs=[source_mode, folder_input, zip_input, images_input, prompt_input,
                 target_album, new_album_name, new_album_parent, resume_input,
-                recursive_input],
+                recursive_input, preset_picker, manual_tags, detect_faces],
         outputs=[status, summary],
         concurrency_limit=1,  # one GPU, one batch at a time
     )

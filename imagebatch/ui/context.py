@@ -7,8 +7,10 @@ from dataclasses import dataclass
 
 from ..batch import MANIFEST_FILE, BatchRunner
 from ..config import Config
+from ..faces import FACES_FILE, FaceRegistry
 from ..manifest import Manifest
 from ..pipeline import EditPipeline
+from ..prompts import Preset, PromptError, load_presets
 from ..storage import AlbumStore
 from ..thumbnails import ThumbnailCache
 
@@ -23,6 +25,9 @@ class AppContext:
     runner: BatchRunner
     manifest: Manifest
     thumbnails: ThumbnailCache
+    faces: FaceRegistry
+    presets: list[Preset]
+    preset_error: str | None = None
 
     @classmethod
     def create(cls, config: Config) -> "AppContext":
@@ -33,5 +38,28 @@ class AppContext:
         pipeline = EditPipeline(config)
         runner = BatchRunner(config, store, pipeline, manifest=manifest)
         thumbnails = ThumbnailCache(store.staging_dir / "thumbs", size=config.thumbnail_size)
+        faces = FaceRegistry(store.root / FACES_FILE,
+                             match_threshold=config.face_match_threshold)
+
+        # A broken prompts.json shouldn't stop the app from starting — surface
+        # it in the UI and carry on with no presets.
+        presets: list[Preset] = []
+        preset_error: str | None = None
+        try:
+            presets = load_presets()
+        except PromptError as exc:
+            preset_error = str(exc)
+            log.warning("Could not load prompt presets: %s", exc)
+
         return cls(config=config, store=store, pipeline=pipeline, runner=runner,
-                   manifest=manifest, thumbnails=thumbnails)
+                   manifest=manifest, thumbnails=thumbnails, faces=faces,
+                   presets=presets, preset_error=preset_error)
+
+    def reload_presets(self) -> str | None:
+        """Re-read prompts.json so edits land without an app restart."""
+        try:
+            self.presets = load_presets()
+            self.preset_error = None
+        except PromptError as exc:
+            self.preset_error = str(exc)
+        return self.preset_error

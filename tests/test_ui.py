@@ -762,7 +762,7 @@ def test_run_batch_creates_named_album(ctx: AppContext, run_tab: dict,
         make_image(sources / f"photo_{i}.png")
 
     updates = list(run_tab["run_batch"]("Folder path", str(sources), None, None, "a prompt",
-                                        UNSORTED, "Batch One", TOP_LEVEL, True, True))
+                                        UNSORTED, "Batch One", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "filed into **Batch One**" in updates[-1][1]
     created = ctx.store.find_by_name("Batch One")
@@ -778,7 +778,7 @@ def test_run_batch_uses_dropdown_album(ctx: AppContext, run_tab: dict,
     make_image(sources / "photo.png")
 
     updates = list(run_tab["run_batch"]("Folder path", str(sources), None, None, "a prompt",
-                                        album.slug, "", TOP_LEVEL, True, True))
+                                        album.slug, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "filed into **Existing**" in updates[-1][1]
     assert ctx.store.list_images(album.slug) == ["photo.png"]
@@ -790,7 +790,7 @@ def test_run_batch_defaults_to_unsorted(ctx: AppContext, run_tab: dict,
     make_image(sources / "photo.png")
 
     list(run_tab["run_batch"]("Folder path", str(sources), None, None, "a prompt",
-                              UNSORTED, "", TOP_LEVEL, True, True))
+                              UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert ctx.store.list_unsorted() == ["photo.png"]
 
@@ -802,7 +802,7 @@ def test_run_batch_duplicate_album_name_reports_error(ctx: AppContext, run_tab: 
     make_image(sources / "photo.png")
 
     updates = list(run_tab["run_batch"]("Folder path", str(sources), None, None, "a prompt",
-                                        UNSORTED, "Taken", TOP_LEVEL, True, True))
+                                        UNSORTED, "Taken", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "already exists" in updates[-1][0]
     assert ctx.store.list_unsorted() == []  # nothing ran
@@ -813,14 +813,14 @@ def test_run_batch_requires_prompt(ctx: AppContext, run_tab: dict, tmp_path: Pat
     make_image(sources / "photo.png")
 
     updates = list(run_tab["run_batch"]("Folder path", str(sources), None, None, "  ",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Enter a prompt" in updates[-1][0]
 
 
 def test_run_batch_requires_source(ctx: AppContext, run_tab: dict) -> None:
     updates = list(run_tab["run_batch"]("Folder path", "", None, None, "a prompt",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Choose a folder" in updates[-1][0]
 
@@ -832,7 +832,7 @@ def test_run_batch_from_uploaded_images(ctx: AppContext, run_tab: dict,
     paths = [str(make_image(uploads / f"IMG_{i}.jpg")) for i in range(3)]
 
     updates = list(run_tab["run_batch"]("Upload images", "", None, paths, "a prompt",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Processed: **3**" in updates[-1][1]
     assert len(ctx.store.list_unsorted()) == 3
@@ -840,14 +840,14 @@ def test_run_batch_from_uploaded_images(ctx: AppContext, run_tab: dict,
 
 def test_run_batch_upload_requires_files(ctx: AppContext, run_tab: dict) -> None:
     updates = list(run_tab["run_batch"]("Upload images", "", None, None, "a prompt",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Choose one or more images" in updates[-1][0]
 
 
 def test_run_batch_upload_requires_files_empty_list(ctx: AppContext, run_tab: dict) -> None:
     updates = list(run_tab["run_batch"]("Upload images", "", None, [], "a prompt",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Choose one or more images" in updates[-1][0]
 
@@ -857,7 +857,7 @@ def test_run_batch_upload_into_album(ctx: AppContext, run_tab: dict, tmp_path: P
     paths = [str(make_image(uploads / "IMG_0.jpg"))]
 
     updates = list(run_tab["run_batch"]("Upload images", "", None, paths, "a prompt",
-                                        UNSORTED, "From Phone", TOP_LEVEL, True, True))
+                                        UNSORTED, "From Phone", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "filed into **From Phone**" in updates[-1][1]
     created = ctx.store.find_by_name("From Phone")
@@ -875,7 +875,7 @@ def test_run_batch_upload_ignores_non_images(ctx: AppContext, run_tab: dict,
     bad.write_text("not an image")
 
     updates = list(run_tab["run_batch"]("Upload images", "", None, [str(good), str(bad)],
-                                        "a prompt", UNSORTED, "", TOP_LEVEL, True, True))
+                                        "a prompt", UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "Processed: **1**" in updates[-1][1]
 
@@ -886,7 +886,7 @@ def test_run_batch_upload_all_non_images_rejected(ctx: AppContext, run_tab: dict
     bad.write_text("not an image")
 
     updates = list(run_tab["run_batch"]("Upload images", "", None, [str(bad)], "a prompt",
-                                        UNSORTED, "", TOP_LEVEL, True, True))
+                                        UNSORTED, "", TOP_LEVEL, True, True, "— none —", "", False))
 
     assert "no valid images" in updates[-1][0]
 

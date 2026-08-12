@@ -642,3 +642,165 @@ def test_uploaded_batch_resumes_on_content(config: Config, tmp_path: Path) -> No
 
     assert second.skipped == 2
     assert second.succeeded == 0
+
+
+# -- tagging and face detection -------------------------------------------
+class FakeDetector:
+    """Stands in for InsightFaceDetector; returns preset embeddings per image."""
+
+    def __init__(self, embeddings_by_name: dict[str, list[list[float]]]) -> None:
+        self.embeddings_by_name = embeddings_by_name
+        self.seen: list[str] = []
+
+    def detect(self, image):
+        from imagebatch.faces import Detection
+        # PIL keeps the source path on .filename when opened from disk.
+        name = Path(getattr(image, "filename", "") or "").name
+        self.seen.append(name)
+        return [Detection(embedding=e, bbox=(0.0, 0.0, 1.0, 1.0))
+                for e in self.embeddings_by_name.get(name, [])]
+
+
+def vec(seed: int, dims: int = 128) -> list[float]:
+    import random
+    rng = random.Random(seed)
+    return [rng.uniform(-1, 1) for _ in range(dims)]
+
+
+def install_fake_faces(runner: BatchRunner, embeddings_by_name) -> FakeDetector:
+    from imagebatch.faces import FaceRegistry
+    detector = FakeDetector(embeddings_by_name)
+    runner._build_face_detector = lambda: detector
+    runner._build_face_registry = lambda: FaceRegistry(
+        runner.store.root / "faces.json", match_threshold=runner.config.face_match_threshold)
+    return detector
+
+
+def test_batch_tags_applied_to_every_output(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    final = run_to_completion(runner, source_dir, "prompt",
+                              tags={"pose": ["Standing"]})
+
+    assert final.succeeded == 4
+    for name in store.list_unsorted():
+        assert store.tags.get_tags(None, name) == {"pose": ["Standing"]}
+
+
+def test_batch_tags_create_missing_category(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    run_to_completion(runner, source_dir, "prompt", tags={"brand-new": ["x"]})
+
+    assert "brand-new" in [c["key"] for c in store.tags.list_categories()]
+
+
+def test_no_tags_leaves_images_untagged(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    run_to_completion(build_runner(config, store), source_dir, "prompt")
+    assert store.tags.all_tagged_images() == {}
+
+
+def test_face_detection_tags_person(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    # img_0 and img_2 are the same person; img_1 is someone else; img_3 has no face.
+    alex, jordan = vec(1), vec(2)
+    install_fake_faces(runner, {
+        "img_0.png": [alex],
+        "img_1.png": [jordan],
+        "img_2.png": [alex],
+        "img_3.png": [],
+    })
+
+    run_to_completion(runner, source_dir, "prompt", detect_faces=True)
+
+    tags = {name: store.tags.get_tags(None, name) for name in store.list_unsorted()}
+    id_0 = tags["img_0.png"]["person"][0]
+    assert tags["img_2.png"]["person"] == [id_0]          # same person, same id
+    assert tags["img_1.png"]["person"] != [id_0]          # different person
+    assert "img_3.png" not in store.tags.all_tagged_images()  # no face, no tag
+
+
+def test_face_detection_combines_with_batch_tags(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    install_fake_faces(runner, {"img_0.png": [vec(1)]})
+
+    run_to_completion(runner, source_dir, "prompt",
+                      tags={"pose": ["Sitting"]}, detect_faces=True)
+
+    tagged = store.tags.get_tags(None, "img_0.png")
+    assert tagged["pose"] == ["Sitting"]
+    assert len(tagged["person"]) == 1
+
+
+def test_multiple_faces_in_one_image(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    install_fake_faces(runner, {"img_0.png": [vec(1), vec(2)]})
+
+    run_to_completion(runner, source_dir, "prompt", detect_faces=True)
+
+    assert len(store.tags.get_tags(None, "img_0.png")["person"]) == 2
+
+
+def test_face_detection_runs_on_source_not_output(config: Config, source_dir: Path) -> None:
+    """Detection must see the original, since the edit can alter the face."""
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    detector = install_fake_faces(runner, {"img_0.png": [vec(1)]})
+
+    run_to_completion(runner, source_dir, "prompt", detect_faces=True)
+
+    assert sorted(detector.seen) == [f"img_{i}.png" for i in range(4)]
+
+
+def test_face_detection_failure_does_not_lose_image(config: Config,
+                                                    source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    class ExplodingDetector:
+        def detect(self, image):
+            raise RuntimeError("detector exploded")
+
+    from imagebatch.faces import FaceRegistry
+    runner._build_face_detector = lambda: ExplodingDetector()
+    runner._build_face_registry = lambda: FaceRegistry(store.root / "faces.json")
+
+    final = run_to_completion(runner, source_dir, "prompt", detect_faces=True)
+
+    assert final.succeeded == 4  # images still produced despite tagging failing
+    assert final.failed == 0
+
+
+def test_missing_insightface_fails_before_any_work(config: Config,
+                                                   source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    def explode():
+        from imagebatch.faces import FaceDetectionError
+        raise FaceDetectionError("insightface is not installed")
+
+    runner._build_face_detector = explode
+
+    with pytest.raises(BatchError, match="insightface"):
+        list(runner.run(source_dir, "prompt", detect_faces=True))
+
+    assert store.list_unsorted() == []  # nothing was processed
+
+
+def test_tags_applied_when_targeting_album(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    album = store.create_album("Batch")
+    runner = build_runner(config, store)
+
+    run_to_completion(runner, source_dir, "prompt", target_album=album.slug,
+                      tags={"pose": ["Standing"]})
+
+    for name in store.list_images(album.slug):
+        assert store.tags.get_tags(album.slug, name) == {"pose": ["Standing"]}

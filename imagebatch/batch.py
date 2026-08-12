@@ -199,6 +199,9 @@ class BatchRunner:
         )
         self._cancel = threading.Event()
         self._running = threading.Lock()
+        # Set by run() for the duration of a run; None when face detection is off.
+        self._face_detector: Any = None
+        self._face_registry: Any = None
 
     # -- control ----------------------------------------------------------
     def cancel(self) -> None:
@@ -208,6 +211,22 @@ class BatchRunner:
     @property
     def is_running(self) -> bool:
         return self._running.locked()
+
+    # -- face recognition wiring -------------------------------------------
+    # Separate factories so tests can substitute fakes without needing the
+    # optional insightface dependency installed.
+    def _build_face_detector(self):
+        from .faces import InsightFaceDetector
+
+        detector = InsightFaceDetector(use_gpu=self.config.face_use_gpu)
+        detector.load()  # surfaces a missing-package error before any work starts
+        return detector
+
+    def _build_face_registry(self):
+        from .faces import FACES_FILE, FaceRegistry
+
+        return FaceRegistry(self.store.root / FACES_FILE,
+                            match_threshold=self.config.face_match_threshold)
 
     # -- helpers ----------------------------------------------------------
     def _output_path(self, source: Path, target_album: str | None) -> Path:
@@ -230,9 +249,11 @@ class BatchRunner:
             fmt = "PNG"
         image.save(path, format=fmt, **params)
 
-    def _plan(self, sources: Sequence[Path], prompt: str, resume: bool) -> tuple[list[dict], int]:
+    def _plan(self, sources: Sequence[Path], prompt: str, resume: bool,
+              tags: dict[str, list[str]] | None = None) -> tuple[list[dict], int]:
         """Split sources into work items and count the ones already finished."""
         signature = self.config.signature()
+        tags = tags or {}
         todo: list[dict] = []
         skipped = 0
         for source in sources:
@@ -241,13 +262,15 @@ class BatchRunner:
             except OSError as exc:
                 # Unreadable file: keep it in the list so it's reported as a
                 # failure rather than silently vanishing from the totals.
-                todo.append({"source": source, "hash": "", "key": "", "error": str(exc)})
+                todo.append({"source": source, "hash": "", "key": "", "error": str(exc),
+                             "tags": tags})
                 continue
             key = Manifest.make_key(digest, prompt, signature)
             if resume and self.manifest.is_done(key):
                 skipped += 1
                 continue
-            todo.append({"source": source, "hash": digest, "key": key, "error": None})
+            todo.append({"source": source, "hash": digest, "key": key, "error": None,
+                         "tags": tags})
         return todo, skipped
 
     def _tune_batch_size(self, items: list[dict], prompt: str) -> int:
@@ -385,10 +408,49 @@ class BatchRunner:
             except StorageError as exc:
                 log.warning("Saved %s but could not file it into %s: %s",
                             output.name, target_album, exc)
+        self._apply_tags(source, target_album, output.name, item.get("tags") or {})
         if item.get("key"):
             self.manifest.record_success(item["key"], source, item["hash"], output,
                                          prompt, duration)
         return ImageResult(source=source, output=output, status="ok", duration=duration)
+
+    def _apply_tags(self, source: Path, album: str | None, filename: str,
+                    batch_tags: dict[str, list[str]]) -> None:
+        """Tag a freshly written output: batch-level tags plus detected faces.
+
+        Never raises — a tagging problem must not turn a successfully generated
+        image into a failed one, so problems are logged and the image is kept.
+        """
+        tags = {category: list(values) for category, values in batch_tags.items()}
+
+        if self._face_detector is not None:
+            # Detect on the *source* image, not the edit: the edit may have
+            # altered the face, and the source is what actually identifies who
+            # is in the photo.
+            try:
+                with Image.open(source) as img:
+                    detections = self._face_detector.detect(img)
+                face_ids = [self._face_registry.match_or_create(d.embedding)
+                            for d in detections]
+                if face_ids:
+                    category = self.config.face_category
+                    tags.setdefault(category, [])
+                    for face_id in face_ids:
+                        if face_id not in tags[category]:
+                            tags[category].append(face_id)
+                    log.info("%s: detected %d face(s) -> %s",
+                             source.name, len(face_ids), ", ".join(face_ids))
+            except Exception as exc:  # noqa: BLE001 - never lose an image over tagging
+                log.warning("Face detection failed for %s: %s", source.name, exc)
+
+        for category, values in tags.items():
+            if not values:
+                continue
+            try:
+                self.store.tags.set_tags(album, filename, category, values)
+            except StorageError as exc:
+                log.warning("Could not tag %s with %s=%s: %s",
+                            filename, category, values, exc)
 
     def _fail(self, item: dict, prompt: str, error: str) -> ImageResult:
         source: Path = item["source"]
@@ -399,11 +461,19 @@ class BatchRunner:
 
     # -- the run ----------------------------------------------------------
     def run(self, source: str | Path, prompt: str, resume: bool = True,
-            recursive: bool = True, target_album: str | None = None) -> Iterator[Progress]:
+            recursive: bool = True, target_album: str | None = None,
+            tags: dict[str, list[str]] | None = None,
+            detect_faces: bool = False) -> Iterator[Progress]:
         """Process every image under *source*, yielding progress as it goes.
 
         Results land in ``unsorted/`` unless *target_album* names an album, in
         which case every image in the batch is filed there as it is produced.
+
+        *tags* are applied to every image the run produces. With *detect_faces*,
+        each source image is additionally run through face recognition and the
+        resulting face ids are added under the configured face category, so a
+        folder of mixed people gets its "who" tagged automatically while "what"
+        comes from the batch-level tags.
         """
         prompt = (prompt or "").strip()
         if not prompt:
@@ -419,13 +489,33 @@ class BatchRunner:
             except StorageError as exc:
                 raise BatchError(str(exc)) from exc
 
+        batch_tags = {c: list(v) for c, v in (tags or {}).items() if v}
+        # Create any categories the caller referenced but that don't exist yet,
+        # so a preset naming a fresh category just works.
+        for category in list(batch_tags) + ([self.config.face_category] if detect_faces else []):
+            try:
+                self.store.tags.create_category(category)
+            except StorageError:
+                pass  # already exists
+
+        if detect_faces:
+            # Fail before any work happens if the optional dependency is absent.
+            try:
+                self._face_detector = self._build_face_detector()
+                self._face_registry = self._build_face_registry()
+            except Exception as exc:  # noqa: BLE001 - surfaced as a user-facing error
+                self._face_detector = self._face_registry = None
+                raise BatchError(str(exc)) from exc
+        else:
+            self._face_detector = self._face_registry = None
+
         with self._running:
             self._cancel.clear()
             started = time.time()
             sources = discover_images(source, self.store.staging_dir, recursive=recursive)
             log.info("Discovered %d source image(s)", len(sources))
 
-            items, skipped = self._plan(sources, prompt, resume)
+            items, skipped = self._plan(sources, prompt, resume, batch_tags)
             progress = Progress(total=len(items), skipped=skipped,
                                 message="Loading model..." if not self.pipeline.loaded else "")
             yield progress

@@ -84,6 +84,15 @@ class Config:
     # auto-generated if omitted. Ignored while model_id is "mock".
     loras: list[dict[str, Any]] = field(default_factory=list)
 
+    # --- face recognition -------------------------------------------------
+    # Only used when a run opts in via the Run tab's "Detect faces" checkbox.
+    # The threshold is cosine similarity between ArcFace embeddings: raise it
+    # if different people get merged into one face, lower it if one person
+    # keeps getting split into several.
+    face_match_threshold: float = 0.5
+    face_use_gpu: bool = False  # CPU is plenty for this model and avoids CUDA pairing
+    face_category: str = "person"  # tag category auto-detected faces are written to
+
     # --- batching / images ----------------------------------------------
     # "auto" benchmarks single vs batched inference on the first images of a run
     # and keeps whichever is faster. An integer pins the batch size.
