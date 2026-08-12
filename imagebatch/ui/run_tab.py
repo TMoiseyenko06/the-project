@@ -194,66 +194,49 @@ def build_run_tab(ctx: AppContext) -> dict:
     reload_presets_button.click(reload_presets, outputs=[preset_picker, preset_note])
 
     def run_batch(mode, folder, zip_path, images, prompt, target, new_name, new_parent,
-                  resume, recursive, preset_name, manual_tag_text, want_faces,
-                  progress=gr.Progress()):
+                  resume, recursive, preset_name, manual_tag_text, want_faces):
         if mode == UPLOAD_MODE:
             if not images:
-                yield "❌ Choose one or more images first.", ""
-                return
+                return "❌ Choose one or more images first.", ""
             try:
                 source = stage_uploads(images, ctx.store.staging_dir)
             except BatchError as exc:
-                yield f"❌ {exc}", ""
-                return
+                return f"❌ {exc}", ""
         else:
             source = folder if mode == FOLDER_MODE else zip_path
         if not source:
-            yield "❌ Choose a folder or upload a zip first.", ""
-            return
+            return "❌ Choose a folder or upload a zip first.", ""
         if not (prompt or "").strip():
-            yield "❌ Enter a prompt.", ""
-            return
+            return "❌ Enter a prompt.", ""
 
         # A name typed here wins over the dropdown: it is the more deliberate act.
         if (new_name or "").strip():
             try:
                 target = ctx.store.create_album(new_name, parent=parent_value(new_parent)).slug
             except StorageError as exc:
-                yield f"❌ {exc}", ""
-                return
+                return f"❌ {exc}", ""
 
         try:
             manual = parse_manual_tags(manual_tag_text)
         except ValueError as exc:
-            yield f"❌ {exc}", ""
-            return
+            return f"❌ {exc}", ""
         preset = find_preset(ctx.presets, preset_name or "")
         batch_tags = merge_tags(preset.tags if preset else {}, manual)
 
-        yield "Starting…", ""
-        # Held explicitly so it can be closed in `finally`. The runner holds its
-        # "one run at a time" lock for the generator's whole lifetime, so an
-        # abandoned generator (browser refresh, navigating away, a stop) would
-        # otherwise keep that lock until garbage collection and make the *next*
-        # run fail with "a batch is already running".
-        run_generator = ctx.runner.run(source, prompt, resume=resume,
-                                       recursive=recursive, target_album=target,
-                                       tags=batch_tags, detect_faces=want_faces)
+        # Start on a background thread and return immediately. The run is not
+        # tied to this browser connection, so refreshing or closing the page
+        # leaves it going — results keep landing in the output directory.
         try:
-            for update in run_generator:
-                if update.total:
-                    progress(update.fraction, desc=f"{update.done}/{update.total}")
-                if update.finished:
-                    yield describe_progress(update), update.message
-                else:
-                    yield describe_progress(update), ""
+            ctx.background.start(source=source, prompt=prompt, resume=resume,
+                                 recursive=recursive, target_album=target,
+                                 tags=batch_tags, detect_faces=want_faces)
         except BatchError as exc:
-            yield f"❌ {exc}", ""
+            return f"❌ {exc}", ""
         except Exception as exc:  # noqa: BLE001 - never leave the UI without a reason
-            log.exception("Batch run failed")
-            yield f"❌ Unexpected error: {type(exc).__name__}: {exc}", ""
-        finally:
-            run_generator.close()
+            log.exception("Could not start batch")
+            return f"❌ Unexpected error: {type(exc).__name__}: {exc}", ""
+        return ("🚀 Started. This keeps running if you close or refresh the page — "
+                "results appear in the Gallery as they finish."), ""
 
     run_event = run_button.click(
         run_batch,
@@ -276,12 +259,36 @@ def build_run_tab(ctx: AppContext) -> dict:
         )
 
     def request_stop():
-        if not ctx.runner.is_running:
+        if not ctx.background.is_active:
             return "Nothing is running."
-        ctx.runner.cancel()
+        ctx.background.cancel()
         return "🛑 Stopping after the current image…"
 
     stop_button.click(request_stop, outputs=status)
+
+    def poll_status():
+        """Render the background run's latest state.
+
+        Reads from the runner rather than driving it, so this reconnects
+        cleanly to a run already in flight after a refresh.
+        """
+        snap = ctx.background.snapshot()
+        if snap["error"]:
+            return f"❌ {snap['error']}", ""
+        update = snap["progress"]
+        if update is None:
+            if snap["active"]:
+                return "🚀 Starting…", ""
+            return ("Ready." if not snap["ever_ran"] else "Finished."), ""
+        text = describe_progress(update)
+        if snap["active"]:
+            text += "\n\n_Running in the background — safe to close this page._"
+        return text, (update.message if update.finished else "")
+
+    # Polls whether or not this browser started the run, so a refreshed page
+    # picks the status back up instead of showing a blank slate.
+    status_timer = gr.Timer(2.0)
+    status_timer.tick(poll_status, outputs=[status, summary])
 
     return {
         "run_event": run_event,
@@ -289,5 +296,6 @@ def build_run_tab(ctx: AppContext) -> dict:
         "refresh": refresh_albums,
         "refresh_inputs": [target_album],
         "refresh_outputs": [target_album, new_album_parent, new_album_name],
-        "handlers": {"run_batch": run_batch, "refresh_albums": refresh_albums},
+        "handlers": {"run_batch": run_batch, "refresh_albums": refresh_albums,
+                     "poll_status": poll_status, "request_stop": request_stop},
     }

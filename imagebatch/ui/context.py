@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from ..background import BackgroundRun
 from ..batch import MANIFEST_FILE, BatchRunner
 from ..config import Config
 from ..faces import FACES_FILE, FaceRegistry
@@ -26,6 +27,7 @@ class AppContext:
     manifest: Manifest
     thumbnails: ThumbnailCache
     faces: FaceRegistry
+    background: BackgroundRun
     presets: list[Preset]
     preset_error: str | None = None
 
@@ -40,6 +42,7 @@ class AppContext:
         thumbnails = ThumbnailCache(store.staging_dir / "thumbs", size=config.thumbnail_size)
         faces = FaceRegistry(store.root / FACES_FILE,
                              match_threshold=config.face_match_threshold)
+        background = BackgroundRun(runner)
 
         # A broken prompts.json shouldn't stop the app from starting — surface
         # it in the UI and carry on with no presets.
@@ -53,7 +56,7 @@ class AppContext:
 
         return cls(config=config, store=store, pipeline=pipeline, runner=runner,
                    manifest=manifest, thumbnails=thumbnails, faces=faces,
-                   presets=presets, preset_error=preset_error)
+                   background=background, presets=presets, preset_error=preset_error)
 
     def reload_presets(self) -> str | None:
         """Re-read prompts.json so edits land without an app restart."""
