@@ -17,6 +17,10 @@ sentencepiece>=0.2       # required by some text encoders (T5, Gemma, ...)
 protobuf>=4.25           # ditto
 peft>=0.13               # required if config.yaml sets `loras:` — diffusers'
                          # load_lora_weights() raises without it installed
+torchvision              # required by some VL-based text encoders' processors
+                         # (e.g. Qwen2VLVideoProcessor) even for image-only use;
+                         # must match your installed torch build — see the torch
+                         # note above
 
 # Optional, uncomment if your model/GPU benefits:
 # xformers                 # memory-efficient attention (match your torch build)
