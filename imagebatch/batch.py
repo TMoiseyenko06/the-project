@@ -372,14 +372,18 @@ class BatchRunner:
             return self._fail(item, prompt, item["error"])
         source: Path = item["source"]
         started = time.time()
+        log.info("  %s: loading", source.name)
         try:
             with Image.open(source) as img:
                 image = img.copy()
         except (OSError, UnidentifiedImageError) as exc:
             return self._fail(item, prompt, f"unreadable image: {exc}")
 
+        log.info("  %s: running inference (%s steps)", source.name,
+                 self.config.num_inference_steps)
         try:
             edited = self.pipeline.edit([image], prompt)
+            log.info("  %s: inference done in %.1fs", source.name, time.time() - started)
         except OutOfMemoryError as exc:
             self.pipeline.free_memory()
             return self._fail(item, prompt, f"out of GPU memory: {exc}")
@@ -408,7 +412,9 @@ class BatchRunner:
             except StorageError as exc:
                 log.warning("Saved %s but could not file it into %s: %s",
                             output.name, target_album, exc)
+        log.info("  %s: saved -> %s", source.name, output.name)
         self._apply_tags(source, target_album, output.name, item.get("tags") or {})
+        log.info("  %s: complete", source.name)
         if item.get("key"):
             self.manifest.record_success(item["key"], source, item["hash"], output,
                                          prompt, duration)
@@ -422,6 +428,8 @@ class BatchRunner:
         image into a failed one, so problems are logged and the image is kept.
         """
         tags = {category: list(values) for category, values in batch_tags.items()}
+        log.info("  %s: tagging (face detection %s)", filename,
+                 "on" if self._face_detector is not None else "off")
 
         if self._face_detector is not None:
             # Detect on the *source* image, not the edit: the edit may have
@@ -447,6 +455,7 @@ class BatchRunner:
             if not values:
                 continue
             try:
+                log.debug("  %s: writing tag %s=%s", filename, category, values)
                 self.store.tags.set_tags(album, filename, category, values)
             except StorageError as exc:
                 log.warning("Could not tag %s with %s=%s: %s",
@@ -515,7 +524,9 @@ class BatchRunner:
             sources = discover_images(source, self.store.staging_dir, recursive=recursive)
             log.info("Discovered %d source image(s)", len(sources))
 
+            log.info("Planning run (hashing %d source(s) for resume)...", len(sources))
             items, skipped = self._plan(sources, prompt, resume, batch_tags)
+            log.info("Plan ready: %d to process, %d already done", len(items), skipped)
             progress = Progress(total=len(items), skipped=skipped,
                                 message="Loading model..." if not self.pipeline.loaded else "")
             yield progress
@@ -538,7 +549,9 @@ class BatchRunner:
                                message=f"❌ Could not load the model: {exc}")
                 return
 
+            log.info("Choosing batch size (config: %r)...", self.config.batch_size)
             batch_size = self._tune_batch_size(items, prompt)
+            log.info("Batch size: %d — starting %d image(s)", batch_size, len(items))
             results: list[ImageResult] = []
             succeeded = failed = 0
             since_save = 0
@@ -547,6 +560,9 @@ class BatchRunner:
                 if self._cancel.is_set():
                     break
                 group = items[offset:offset + batch_size]
+                log.info("Group %d/%d: %s", offset // batch_size + 1,
+                         (len(items) + batch_size - 1) // batch_size,
+                         ", ".join(i["source"].name for i in group))
                 progress = Progress(
                     done=len(results), total=len(items), succeeded=succeeded, failed=failed,
                     skipped=skipped, current=group[0]["source"].name,

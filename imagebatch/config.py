@@ -275,3 +275,17 @@ def configure_logging(level: str = "INFO") -> None:
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
         datefmt="%H:%M:%S",
     )
+    # A hung run shows nothing in the log by definition, so make it possible to
+    # ask the process what every thread is doing:  kill -USR1 <pid>
+    # (py-spy needs ptrace, which containers commonly don't grant.)
+    try:
+        import faulthandler
+        import signal
+
+        faulthandler.enable()
+        if hasattr(signal, "SIGUSR1"):
+            faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+            logging.getLogger(__name__).info(
+                "Thread dump on demand: kill -USR1 %d", os.getpid())
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never block startup
+        logging.getLogger(__name__).debug("Could not install faulthandler: %s", exc)

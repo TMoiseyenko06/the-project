@@ -344,9 +344,13 @@ class EditPipeline:
 
         call_kwargs = {"prompt": prompts, self.image_kwarg_name(): image_arg, **kwargs}
 
+        log.debug("edit(): waiting for pipeline lock (%d image(s))", len(prepared))
         with self._lock:  # a single GPU pipeline is not safe to call concurrently
+            log.debug("edit(): lock acquired, calling pipeline with %s",
+                      sorted(k for k in call_kwargs if k != "image"))
             try:
                 result = self._invoke(call_kwargs)
+                log.debug("edit(): pipeline returned")
             except Exception as exc:  # noqa: BLE001 - classified and re-raised below
                 if is_oom(exc):
                     self.free_memory()
