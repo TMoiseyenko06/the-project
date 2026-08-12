@@ -158,6 +158,30 @@ downloads, so you can click through the whole UI — batching, albums, zips,
 resume — before committing to a model. The Run tab shows a warning while mock
 is active.
 
+### Face detection (optional)
+
+Only needed if you tick **Detect faces** on the Run tab. Not in
+`requirements.txt` since most runs don't need it:
+
+```bash
+pip install insightface onnxruntime
+# insightface pulls in the desktop OpenCV build, which needs X11 libraries a
+# headless server doesn't have. Swap it for the headless build or every
+# import fails with "libxcb.so.1: cannot open shared object file":
+pip uninstall -y opencv-python opencv-contrib-python
+pip install opencv-python-headless
+```
+
+Verify before relying on it — a broken install is only reported when a run
+starts:
+
+```bash
+python -c "from insightface.app import FaceAnalysis; print('ok')"
+```
+
+The first run with detection enabled downloads the `buffalo_l` model pack
+(~300MB) into `~/.insightface`.
+
 ## 3. Launch
 
 ```bash
