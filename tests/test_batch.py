@@ -804,3 +804,49 @@ def test_tags_applied_when_targeting_album(config: Config, source_dir: Path) -> 
 
     for name in store.list_images(album.slug):
         assert store.tags.get_tags(album.slug, name) == {"pose": ["Standing"]}
+
+
+# -- abandoned runs must not wedge the runner -----------------------------
+def test_abandoned_run_releases_lock_on_close(config: Config, source_dir: Path) -> None:
+    """A generator abandoned mid-run (page refresh) must free the runner.
+
+    Without an explicit close the runner's "one run at a time" lock stays held
+    until garbage collection, so the *next* run fails — the alternating
+    works/fails pattern.
+    """
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    generator = runner.run(source_dir, "prompt")
+    next(generator)              # enter the run; lock is now held
+    assert runner.is_running
+
+    generator.close()            # what the UI's finally: block does
+
+    assert not runner.is_running
+    # and a fresh run works immediately, rather than raising "already running"
+    final = run_to_completion(runner, source_dir, "prompt")
+    assert final.succeeded == 4
+
+
+def test_consecutive_abandoned_runs_all_recover(config: Config, source_dir: Path) -> None:
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+
+    for _ in range(3):
+        generator = runner.run(source_dir, "prompt", resume=False)
+        next(generator)
+        generator.close()
+        assert not runner.is_running
+
+
+def test_face_state_cleared_between_runs(config: Config, source_dir: Path) -> None:
+    """detect_faces=True then False must not leave the detector wired up."""
+    store = AlbumStore(config.output_path)
+    runner = build_runner(config, store)
+    install_fake_faces(runner, {"img_0.png": [vec(1)]})
+    run_to_completion(runner, source_dir, "prompt", detect_faces=True)
+
+    run_to_completion(runner, source_dir, "second prompt", detect_faces=False)
+
+    assert runner._face_detector is None

@@ -488,7 +488,9 @@ class BatchRunner:
         if not prompt:
             raise BatchError("a prompt is required")
         if self.is_running:
-            raise BatchError("a batch is already running")
+            raise BatchError(
+                "a batch is already running — if you refreshed the page mid-run, "
+                "wait a moment and try again")
         if target_album == UNSORTED:
             target_album = None
         if target_album is not None:

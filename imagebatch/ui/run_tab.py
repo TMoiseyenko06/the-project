@@ -231,10 +231,16 @@ def build_run_tab(ctx: AppContext) -> dict:
         batch_tags = merge_tags(preset.tags if preset else {}, manual)
 
         yield "Starting…", ""
+        # Held explicitly so it can be closed in `finally`. The runner holds its
+        # "one run at a time" lock for the generator's whole lifetime, so an
+        # abandoned generator (browser refresh, navigating away, a stop) would
+        # otherwise keep that lock until garbage collection and make the *next*
+        # run fail with "a batch is already running".
+        run_generator = ctx.runner.run(source, prompt, resume=resume,
+                                       recursive=recursive, target_album=target,
+                                       tags=batch_tags, detect_faces=want_faces)
         try:
-            for update in ctx.runner.run(source, prompt, resume=resume,
-                                         recursive=recursive, target_album=target,
-                                         tags=batch_tags, detect_faces=want_faces):
+            for update in run_generator:
                 if update.total:
                     progress(update.fraction, desc=f"{update.done}/{update.total}")
                 if update.finished:
@@ -246,6 +252,8 @@ def build_run_tab(ctx: AppContext) -> dict:
         except Exception as exc:  # noqa: BLE001 - never leave the UI without a reason
             log.exception("Batch run failed")
             yield f"❌ Unexpected error: {type(exc).__name__}: {exc}", ""
+        finally:
+            run_generator.close()
 
     run_event = run_button.click(
         run_batch,
