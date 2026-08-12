@@ -231,16 +231,27 @@ class InsightFaceDetector:
         try:
             from insightface.app import FaceAnalysis
         except ImportError as exc:
+            # Don't assume "not installed": this same ImportError fires when
+            # insightface IS present but one of its own dependencies (commonly
+            # onnxruntime) fails to import, so surface the real cause too.
             raise FaceDetectionError(
-                "Face detection needs the `insightface` package (and `onnxruntime` "
-                "or `onnxruntime-gpu`), which isn't installed. Run: pip install "
-                "insightface onnxruntime"
+                f"Could not import insightface: {exc}\n"
+                "If insightface is already installed, this usually means one of "
+                "its dependencies is missing or broken — check `onnxruntime`. "
+                "Otherwise run: pip install insightface onnxruntime"
             ) from exc
 
-        app = FaceAnalysis(name="buffalo_l",
-                           providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-                           if self.use_gpu else ["CPUExecutionProvider"])
-        app.prepare(ctx_id=0 if self.use_gpu else -1)
+        try:
+            app = FaceAnalysis(name="buffalo_l",
+                               providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+                               if self.use_gpu else ["CPUExecutionProvider"])
+            # First run downloads the buffalo_l pack (~300MB) into ~/.insightface.
+            app.prepare(ctx_id=0 if self.use_gpu else -1)
+        except Exception as exc:  # noqa: BLE001 - model load/download, many causes
+            raise FaceDetectionError(
+                f"insightface imported but failed to load its model: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         self._app = app
         log.info("Loaded insightface buffalo_l (%s)", "GPU" if self.use_gpu else "CPU")
 
